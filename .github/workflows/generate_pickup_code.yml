@@ -51,7 +51,24 @@ jobs:
           npm init -y
           npm install puppeteer node-tesseract-ocr
 
-      # ── 6. Generate pickup code ───────────────────────────────────────────────
+      # ── 6. Validate secrets ───────────────────────────────────────────────────
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.XYZ_USERNAME }}" ]; then
+            echo "❌ ERROR: XYZ_USERNAME secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.XYZ_PASSWORD }}" ]; then
+            echo "❌ ERROR: XYZ_PASSWORD secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.XYZ_DEVICE }}" ]; then
+            echo "❌ ERROR: XYZ_DEVICE secret is not set"
+            exit 1
+          fi
+          echo "✅ All secrets are present"
+
+      # ── 7. Generate pickup code ───────────────────────────────────────────────
       - name: Generate pickup code
         id: generate
         env:
@@ -59,19 +76,37 @@ jobs:
           XYZ_PASSWORD: ${{ secrets.XYZ_PASSWORD }}
           XYZ_DEVICE:   ${{ secrets.XYZ_DEVICE }}
         run: |
+          set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
+          EXIT_CODE=$?
+
+          echo "──────────────── Node.js Output ────────────────"
           echo "$OUTPUT"
+          echo "────────────────────────────────────────────────"
 
           # Extract the JSON output line
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
+
+          if [ -z "$JSON" ]; then
+            echo "❌ ERROR: No OUTPUT_JSON line found in script output"
+            exit 1
+          fi
+
           echo "result=$JSON" >> $GITHUB_OUTPUT
 
           # Extract pickup code for subsequent steps
-          PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))")
+          PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
-          echo "✅ Pickup code: $PICK_CODE"
 
-      # ── 7. Upload debug artifacts on failure ─────────────────────────────────
+          if [ -z "$PICK_CODE" ]; then
+            echo "❌ ERROR: Failed to extract pickup code from JSON: $JSON"
+            exit 1
+          fi
+
+          echo "✅ Pickup code: $PICK_CODE"
+          exit $EXIT_CODE
+
+      # ── 8. Upload debug artifacts on failure ─────────────────────────────────
       - name: Upload debug artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -81,12 +116,12 @@ jobs:
             error_screenshot.png
             captcha.png
 
-      # ── 8. Send pickup code to customer ──────────────────────────────────────
+      # ── 9. Send pickup code to customer ──────────────────────────────────────
       - name: Send pickup code to customer
         if: success()
         env:
-          PICK_CODE:            ${{ steps.generate.outputs.pick_code }}
-          SHOPIFY_WEBHOOK_URL:  ${{ secrets.SHOPIFY_WEBHOOK_URL }}
+          PICK_CODE:           ${{ steps.generate.outputs.pick_code }}
+          SHOPIFY_WEBHOOK_URL: ${{ secrets.SHOPIFY_WEBHOOK_URL }}
         run: |
           echo "📦 Sending pickup code $PICK_CODE to customer..."
           # Add your notification method below — pick one:
@@ -97,19 +132,19 @@ jobs:
           #   -d "{\"pick_code\": \"$PICK_CODE\"}"
           #
           # Option B — Send WhatsApp via Twilio:
-          # curl -s -X POST "[api.twilio.com](https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json)" \
+          # curl -s -X POST "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json" \
           #   --data-urlencode "To=whatsapp:+60XXXXXXXXX" \
           #   --data-urlencode "From=whatsapp:$TWILIO_WHATSAPP_FROM" \
           #   --data-urlencode "Body=Your pickup code is: $PICK_CODE" \
           #   -u "$TWILIO_SID:$TWILIO_AUTH_TOKEN"
           #
           # Option C — POST to Make.com / Zapier webhook:
-          # curl -s -X POST "[hook.make.com](https://hook.make.com/YOUR_HOOK_ID)" \
+          # curl -s -X POST "https://hook.make.com/YOUR_HOOK_ID" \
           #   -H "Content-Type: application/json" \
           #   -d "{\"pick_code\": \"$PICK_CODE\", \"order_id\": \"${{ github.event.inputs.order_id }}\"}"
           echo "PICK_CODE=$PICK_CODE" >> $GITHUB_ENV
 
-      # ── 9. Save pickup code result to repo ───────────────────────────────────
+      # ── 10. Save pickup code result to repo ──────────────────────────────────
       - name: Save pickup code result
         if: success()
         run: |
