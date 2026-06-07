@@ -1,0 +1,98 @@
+name: Generate XYZ Vending Pickup Code
+
+on:
+  # Trigger when order JSON is pushed
+  push:
+    paths:
+      - 'orders/orders_*.json'
+
+  # Or trigger manually from GitHub UI
+  workflow_dispatch:
+    inputs:
+      order_id:
+        description: 'Shopify Order ID'
+        required: true
+
+jobs:
+  generate-pickup-code:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout repo ───────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Node.js ───────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 3. Install Puppeteer ───────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install puppeteer
+
+      # ── 4. Install Chrome dependencies (Ubuntu) ────────────────────────────
+      - name: Install Chrome dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libxcomposite1 libxdamage1 \
+            libxrandr2 libgbm1 libasound2
+
+      # ── 5. Run the automation ──────────────────────────────────────────────
+      - name: Generate pickup code
+        id: generate
+        env:
+          XYZ_USERNAME: ${{ secrets.XYZ_USERNAME }}
+          XYZ_PASSWORD: ${{ secrets.XYZ_PASSWORD }}
+          XYZ_DEVICE:   ${{ secrets.XYZ_DEVICE }}
+        run: |
+          OUTPUT=$(node generate_pickup_code.js 2>&1)
+          echo "$OUTPUT"
+
+          # Extract the JSON output line
+          JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
+          echo "result=$JSON" >> $GITHUB_OUTPUT
+
+          # Extract pickup code for next steps
+          PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))")
+          echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
+          echo "✅ Pickup code: $PICK_CODE"
+
+      # ── 6. Upload error screenshot if failed ──────────────────────────────
+      - name: Upload error screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot
+          path: error_screenshot.png
+
+      # ── 7. Send pickup code to customer (via email/webhook) ───────────────
+      - name: Send pickup code to customer
+        if: success()
+        env:
+          PICK_CODE: ${{ steps.generate.outputs.pick_code }}
+          SHOPIFY_WEBHOOK_URL: ${{ secrets.SHOPIFY_WEBHOOK_URL }}
+        run: |
+          echo "📦 Sending pickup code $PICK_CODE to customer..."
+          # Add your notification step here:
+          # - curl to send WhatsApp via Twilio
+          # - curl to trigger Shopify email
+          # - curl to Make.com/Zapier webhook
+          echo "PICK_CODE=$PICK_CODE" >> $GITHUB_ENV
+
+      # ── 8. Save result to repo ────────────────────────────────────────────
+      - name: Save pickup code result
+        if: success()
+        run: |
+          mkdir -p pickup_codes
+          echo '${{ steps.generate.outputs.result }}' > pickup_codes/latest.json
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add pickup_codes/
+          git diff --staged --quiet || git commit -m "Add pickup code ${{ steps.generate.outputs.pick_code }}"
+          git push
