@@ -29,7 +29,7 @@ jobs:
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr sharp
+          sudo apt-get install -y tesseract-ocr
 
       # ── 4. Install Chrome system dependencies ────────────────────────────────
       - name: Install Chrome dependencies
@@ -49,7 +49,7 @@ jobs:
       - name: Install Node dependencies
         run: |
           npm init -y
-          npm install puppeteer node-tesseract-ocr
+          npm install puppeteer node-tesseract-ocr sharp
 
       # ── 6. Validate secrets ───────────────────────────────────────────────────
       - name: Validate secrets
@@ -113,16 +113,16 @@ jobs:
         with:
           name: debug-artifacts
           path: |
-               error_screenshot.png
-               after_login.png
-               after_transaction_click.png
-               pickup_code_page.png
-               after_add_click.png
-               before_submit.png
-               after_submit.png
-               captcha_raw.png
-               captcha.png
-               captcha_debug.png
+            error_screenshot.png
+            after_login.png
+            after_transaction_click.png
+            pickup_code_page.png
+            after_add_click.png
+            before_submit.png
+            after_submit.png
+            captcha_raw.png
+            captcha.png
+            captcha_debug.png
 
       # ── 9. Send pickup code to customer ──────────────────────────────────────
       - name: Send pickup code to customer
