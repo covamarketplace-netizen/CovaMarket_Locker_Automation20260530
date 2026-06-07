@@ -14,7 +14,7 @@ const fs        = require('fs');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const CONFIG = {
-  url:      '[xzyvend.com](http://xzyvend.com)',
+  url:      'https://xzyvend.com/login',
   username: process.env.XYZ_USERNAME || '0108668014',
   password: process.env.XYZ_PASSWORD,
   device:   process.env.XYZ_DEVICE   || '默认设备',
@@ -85,7 +85,7 @@ async function generatePickupCode() {
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage', // required for GitHub Actions
+      '--disable-dev-shm-usage',
       '--disable-gpu',
     ],
   });
@@ -100,6 +100,10 @@ async function generatePickupCode() {
     // ── STEP 1: Load login page ───────────────────────────────────────────────
     console.log('🔐 Navigating to login page...');
     await page.goto(CONFIG.url, { waitUntil: 'networkidle2', timeout: CONFIG.timeout });
+
+    // Take screenshot to verify page loaded
+    await page.screenshot({ path: 'login_page.png', fullPage: true });
+    console.log('📸 Login page screenshot saved → login_page.png');
 
     // Wait for login form to appear
     await page.waitForSelector(
@@ -116,12 +120,14 @@ async function generatePickupCode() {
     if (!usernameInput) throw new Error('Username input not found on login page');
     await usernameInput.click({ clickCount: 3 });
     await usernameInput.type(CONFIG.username);
+    console.log(`✏️  Typed username: ${CONFIG.username}`);
 
     // ── Fill password ─────────────────────────────────────────────────────────
     const passwordInput = await page.$('input[type="password"]');
     if (!passwordInput) throw new Error('Password input not found on login page');
     await passwordInput.click({ clickCount: 3 });
     await passwordInput.type(CONFIG.password);
+    console.log('✏️  Typed password');
 
     // ── Handle CAPTCHA if present ─────────────────────────────────────────────
     const captchaInput = await page.$(
@@ -153,6 +159,10 @@ async function generatePickupCode() {
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: CONFIG.timeout });
     console.log('✅ Logged in successfully');
 
+    // Screenshot after login to confirm
+    await page.screenshot({ path: 'after_login.png', fullPage: true });
+    console.log('📸 Post-login screenshot saved → after_login.png');
+
     // ── STEP 2: Navigate to 取货码管理 (Pickup Code Management) ───────────────
     console.log('📍 Navigating to pickup code management...');
 
@@ -172,6 +182,10 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(1500);
     console.log('✅ On pickup code management page');
+
+    // Screenshot to confirm navigation
+    await page.screenshot({ path: 'pickup_code_page.png', fullPage: true });
+    console.log('📸 Pickup code page screenshot saved → pickup_code_page.png');
 
     // ── STEP 3: Click 添加 (Add) button ──────────────────────────────────────
     console.log('➕ Clicking Add button...');
@@ -232,14 +246,17 @@ async function generatePickupCode() {
     console.log('📨 Submitting form...');
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button, .el-button')];
-      // Target the 确定 button specifically inside the dialog footer
       const confirmBtn = btns.filter(b =>
         b.textContent.trim() === '确定' &&
         b.closest('.el-dialog, .el-dialog__footer, [class*="dialog"]')
-      ).pop(); // .pop() gets the last match (innermost dialog button)
+      ).pop();
       if (confirmBtn) confirmBtn.click();
     });
     await page.waitForTimeout(2000);
+
+    // Screenshot after submission
+    await page.screenshot({ path: 'after_submit.png', fullPage: true });
+    console.log('📸 Post-submit screenshot saved → after_submit.png');
 
     // ── STEP 8: Extract the generated pickup code from table ──────────────────
     console.log('🔍 Extracting pickup code from table...');
@@ -248,7 +265,6 @@ async function generatePickupCode() {
       const rows = [...document.querySelectorAll('table tbody tr, .el-table__row')];
       if (!rows.length) return null;
 
-      // Most recent entry is at the top (row 0)
       const cells     = [...rows[0].querySelectorAll('td')];
       const cellTexts = cells.map(c => c.textContent.trim());
 
@@ -273,7 +289,6 @@ async function generatePickupCode() {
     console.log('═══════════════════════════════════');
     console.log('');
 
-    // Structured output — captured by the workflow
     const output = {
       success:     true,
       pickCode:    result.pickCode,
@@ -288,7 +303,6 @@ async function generatePickupCode() {
   } catch (err) {
     console.error('❌ Error:', err.message);
 
-    // Full-page screenshot for debugging
     await page.screenshot({ path: 'error_screenshot.png', fullPage: true });
     console.log('📸 Error screenshot saved → error_screenshot.png');
 
