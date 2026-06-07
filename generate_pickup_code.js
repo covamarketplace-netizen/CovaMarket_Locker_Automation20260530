@@ -2,10 +2,6 @@
  * generate_pickup_code.js
  * Automates XYZ Vending UI to generate a 6-digit pickup code
  * Uses Puppeteer (headless Chrome) + Tesseract OCR for CAPTCHA solving
- *
- * Usage:
- *   node generate_pickup_code.js
- *   Returns: { pickCode: "319508", orderNo: "202605..." }
  */
 
 const puppeteer = require('puppeteer');
@@ -25,37 +21,46 @@ const CONFIG = {
 
 /**
  * Solve CAPTCHA using Tesseract OCR.
- * Screenshots the CAPTCHA element, runs OCR, retries up to 3x by clicking
- * the image to refresh if the result is too short.
+ * The CAPTCHA image uses a base64 inline src with class="code-img-wrap"
  */
 async function solveCaptcha(page) {
   const tesseractConfig = {
     lang: 'eng',
-    oem:  1,  // LSTM neural net engine
-    psm:  8,  // Treat image as a single word
-    tessedit_char_whitelist:
-      '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+    oem:  1,
+    psm:  8,
+    tessedit_char_whitelist: '0123456789',
   };
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     console.log(`🧩 CAPTCHA solve attempt ${attempt}/3...`);
 
-    // Locate CAPTCHA image element
+    // Target by class or alt attribute (base64 src won't match src* selectors)
     const captchaEl = await page.$(
-      'img[src*="captcha"], img[src*="verify"], img[src*="code"], ' +
-      '[class*="captcha"] img, [class*="verify"] img, canvas'
+      'img.code-img-wrap, ' +
+      'img[alt="点击刷新"], ' +
+      'img[alt*="刷新"], ' +
+      'img[alt*="验证"]'
     );
 
     if (!captchaEl) {
-      console.log('  ℹ️  No CAPTCHA element found — skipping');
-      return null;
+      // Dump all img info for debugging
+      const allImgs = await page.evaluate(() =>
+        [...document.querySelectorAll('img')].map(i => ({
+          src:       i.src.substring(0, 80), // trim base64
+          className: i.className,
+          alt:       i.alt,
+          id:        i.id,
+        }))
+      );
+      console.log('  ⚠️  No CAPTCHA img found. All imgs on page:');
+      console.log(JSON.stringify(allImgs, null, 2));
+      await page.screenshot({ path: 'captcha_debug.png', fullPage: true });
+      throw new Error('Cannot find CAPTCHA image element. Check captcha_debug.png artifact.');
     }
 
-    // Screenshot just the CAPTCHA element (not full page)
     await captchaEl.screenshot({ path: 'captcha.png' });
     console.log('  📸 CAPTCHA screenshot captured');
 
-    // Run Tesseract OCR
     const raw     = await tesseract.recognize('captcha.png', tesseractConfig);
     const cleaned = raw.replace(/\s+/g, '').trim();
     console.log(`  🔍 OCR raw: "${raw.trim()}" → cleaned: "${cleaned}"`);
@@ -65,16 +70,13 @@ async function solveCaptcha(page) {
       return cleaned;
     }
 
-    // Too short — refresh CAPTCHA by clicking it and retry
+    // Refresh CAPTCHA by clicking it
     console.log('  ⚠️  Result too short, refreshing CAPTCHA...');
     await captchaEl.click();
     await page.waitForTimeout(1200);
   }
 
-  throw new Error(
-    'Tesseract OCR failed to read CAPTCHA after 3 attempts. ' +
-    'Download captcha.png from the Actions artifacts to inspect.'
-  );
+  throw new Error('Tesseract OCR failed to read CAPTCHA after 3 attempts. Check captcha.png artifact.');
 }
 
 async function generatePickupCode() {
@@ -92,8 +94,6 @@ async function generatePickupCode() {
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
-
-  // Suppress noisy browser console output
   page.on('console', () => {});
 
   try {
@@ -101,35 +101,33 @@ async function generatePickupCode() {
     console.log('🔐 Navigating to login page...');
     await page.goto(CONFIG.url, { waitUntil: 'networkidle2', timeout: CONFIG.timeout });
 
-    // Take screenshot to verify page loaded
     await page.screenshot({ path: 'login_page.png', fullPage: true });
     console.log('📸 Login page screenshot saved → login_page.png');
 
-    // Wait for login form to appear
+    // ── Fill username ─────────────────────────────────────────────────────────
     await page.waitForSelector(
       'input[placeholder="Account Number"], input[placeholder*="账号"], input[type="text"]',
       { timeout: CONFIG.timeout }
     );
 
-    // ── Fill username ─────────────────────────────────────────────────────────
     const usernameInput =
       (await page.$('input[placeholder="Account Number"]')) ||
       (await page.$('input[placeholder*="账号"]'))          ||
       (await page.$('input[type="text"]'));
 
-    if (!usernameInput) throw new Error('Username input not found on login page');
+    if (!usernameInput) throw new Error('Username input not found');
     await usernameInput.click({ clickCount: 3 });
     await usernameInput.type(CONFIG.username);
-    console.log(`✏️  Typed username: ${CONFIG.username}`);
+    console.log('✏️  Typed username');
 
     // ── Fill password ─────────────────────────────────────────────────────────
     const passwordInput = await page.$('input[type="password"]');
-    if (!passwordInput) throw new Error('Password input not found on login page');
+    if (!passwordInput) throw new Error('Password input not found');
     await passwordInput.click({ clickCount: 3 });
     await passwordInput.type(CONFIG.password);
     console.log('✏️  Typed password');
 
-    // ── Handle CAPTCHA if present ─────────────────────────────────────────────
+    // ── Handle CAPTCHA ────────────────────────────────────────────────────────
     const captchaInput = await page.$(
       'input[placeholder="Verification Code"], ' +
       'input[placeholder*="验证码"], '            +
@@ -148,6 +146,10 @@ async function generatePickupCode() {
       console.log('ℹ️  No CAPTCHA field — proceeding without it');
     }
 
+    // Screenshot before clicking login
+    await page.screenshot({ path: 'before_login.png', fullPage: true });
+    console.log('📸 Pre-login screenshot saved → before_login.png');
+
     // ── Click Sign In ─────────────────────────────────────────────────────────
     const loginBtn =
       (await page.$('button[type="submit"]')) ||
@@ -155,18 +157,19 @@ async function generatePickupCode() {
       (await page.$('button'));
 
     if (!loginBtn) throw new Error('Login button not found');
-    await loginBtn.click();
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: CONFIG.timeout });
+
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: CONFIG.timeout }),
+      loginBtn.click(),
+    ]);
     console.log('✅ Logged in successfully');
 
-    // Screenshot after login to confirm
     await page.screenshot({ path: 'after_login.png', fullPage: true });
     console.log('📸 Post-login screenshot saved → after_login.png');
 
-    // ── STEP 2: Navigate to 取货码管理 (Pickup Code Management) ───────────────
+    // ── STEP 2: Navigate to 取货码管理 ────────────────────────────────────────
     console.log('📍 Navigating to pickup code management...');
 
-    // Click 交易管理 (Transaction Management) in sidebar
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div')];
       const target = items.find(el => el.textContent.trim() === '交易管理');
@@ -174,7 +177,6 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(1000);
 
-    // Click 取货码管理 (Pickup Code Management)
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div, a')];
       const target = items.find(el => el.textContent.trim() === '取货码管理');
@@ -183,11 +185,9 @@ async function generatePickupCode() {
     await page.waitForTimeout(1500);
     console.log('✅ On pickup code management page');
 
-    // Screenshot to confirm navigation
     await page.screenshot({ path: 'pickup_code_page.png', fullPage: true });
-    console.log('📸 Pickup code page screenshot saved → pickup_code_page.png');
 
-    // ── STEP 3: Click 添加 (Add) button ──────────────────────────────────────
+    // ── STEP 3: Click 添加 ────────────────────────────────────────────────────
     console.log('➕ Clicking Add button...');
     await page.evaluate(() => {
       const btns   = [...document.querySelectorAll('button, .el-button')];
@@ -196,7 +196,7 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(1500);
 
-    // ── STEP 4: Select 随机生成 (Random Generate) radio ──────────────────────
+    // ── STEP 4: Select 随机生成 ───────────────────────────────────────────────
     console.log('🎲 Selecting Random Generate mode...');
     await page.evaluate(() => {
       const labels = [...document.querySelectorAll('label, span, .el-radio__label')];
@@ -205,10 +205,8 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(800);
 
-    // ── STEP 5: Select device from dropdown ──────────────────────────────────
+    // ── STEP 5: Select device ─────────────────────────────────────────────────
     console.log(`📦 Selecting device: ${CONFIG.device}...`);
-
-    // Open the device dropdown
     await page.evaluate(() => {
       const inputs      = [...document.querySelectorAll('.el-select .el-input__inner')];
       const deviceInput = inputs.find(el => el.placeholder?.includes('设备'));
@@ -216,7 +214,6 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(800);
 
-    // Click the matching device option
     await page.evaluate((deviceName) => {
       const options = [...document.querySelectorAll('.el-select-dropdown__item')];
       const option  = options.find(el => el.textContent.includes(deviceName));
@@ -242,7 +239,7 @@ async function generatePickupCode() {
     }, CONFIG.quantity);
     await page.waitForTimeout(500);
 
-    // ── STEP 7: Click 确定 (Confirm) in dialog ────────────────────────────────
+    // ── STEP 7: Confirm dialog ────────────────────────────────────────────────
     console.log('📨 Submitting form...');
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button, .el-button')];
@@ -254,13 +251,10 @@ async function generatePickupCode() {
     });
     await page.waitForTimeout(2000);
 
-    // Screenshot after submission
     await page.screenshot({ path: 'after_submit.png', fullPage: true });
-    console.log('📸 Post-submit screenshot saved → after_submit.png');
 
-    // ── STEP 8: Extract the generated pickup code from table ──────────────────
+    // ── STEP 8: Extract pickup code ───────────────────────────────────────────
     console.log('🔍 Extracting pickup code from table...');
-
     const result = await page.evaluate(() => {
       const rows = [...document.querySelectorAll('table tbody tr, .el-table__row')];
       if (!rows.length) return null;
@@ -302,7 +296,6 @@ async function generatePickupCode() {
 
   } catch (err) {
     console.error('❌ Error:', err.message);
-
     await page.screenshot({ path: 'error_screenshot.png', fullPage: true });
     console.log('📸 Error screenshot saved → error_screenshot.png');
 
