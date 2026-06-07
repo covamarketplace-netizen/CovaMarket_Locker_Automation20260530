@@ -49,7 +49,7 @@ jobs:
       - name: Install Node dependencies
         run: |
           npm init -y
-          npm install puppeteer node-tesseract-ocr 
+          npm install puppeteer node-tesseract-ocr sharp
 
       # ── 6. Validate secrets ───────────────────────────────────────────────────
       - name: Validate secrets
