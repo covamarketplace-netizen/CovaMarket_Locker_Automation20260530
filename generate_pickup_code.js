@@ -19,18 +19,16 @@ const CONFIG = {
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Replacement for removed page.waitForTimeout
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
  * Solve CAPTCHA using Tesseract OCR.
- * The CAPTCHA image uses a base64 inline src with class="code-img-wrap"
  */
 async function solveCaptcha(page) {
   const tesseractConfig = {
     lang: 'eng',
     oem:  1,
-    psm:  7,  // treat as single line of text (better than psm 8 for 4-digit codes)
+    psm:  7,
     tessedit_char_whitelist: '0123456789',
   };
 
@@ -53,22 +51,15 @@ async function solveCaptcha(page) {
           id:        i.id,
         }))
       );
-      console.log('  ⚠️  No CAPTCHA img found. All imgs on page:');
-      console.log(JSON.stringify(allImgs, null, 2));
+      console.log('  ⚠️  No CAPTCHA img found. All imgs:', JSON.stringify(allImgs, null, 2));
       await page.screenshot({ path: 'captcha_debug.png', fullPage: true });
-      throw new Error('Cannot find CAPTCHA image element. Check captcha_debug.png artifact.');
+      throw new Error('Cannot find CAPTCHA image element.');
     }
 
-    // Screenshot the CAPTCHA element at 3x scale for better OCR accuracy
     const box = await captchaEl.boundingBox();
     await page.screenshot({
       path: 'captcha.png',
-      clip: {
-        x:      box.x,
-        y:      box.y,
-        width:  box.width,
-        height: box.height,
-      },
+      clip: { x: box.x, y: box.y, width: box.width, height: box.height },
     });
     console.log('  📸 CAPTCHA screenshot captured');
 
@@ -86,7 +77,7 @@ async function solveCaptcha(page) {
     await sleep(1200);
   }
 
-  throw new Error('Tesseract OCR failed to read CAPTCHA after 3 attempts. Check captcha.png artifact.');
+  throw new Error('Tesseract OCR failed after 3 attempts.');
 }
 
 async function generatePickupCode() {
@@ -107,14 +98,10 @@ async function generatePickupCode() {
   page.on('console', () => {});
 
   try {
-    // ── STEP 1: Load login page ───────────────────────────────────────────────
+    // ── STEP 1: Login ─────────────────────────────────────────────────────────
     console.log('🔐 Navigating to login page...');
     await page.goto(CONFIG.url, { waitUntil: 'networkidle2', timeout: CONFIG.timeout });
 
-    await page.screenshot({ path: 'login_page.png', fullPage: true });
-    console.log('📸 Login page screenshot saved → login_page.png');
-
-    // ── Fill username ─────────────────────────────────────────────────────────
     await page.waitForSelector(
       'input[placeholder="Account Number"], input[placeholder*="账号"], input[type="text"]',
       { timeout: CONFIG.timeout }
@@ -130,14 +117,12 @@ async function generatePickupCode() {
     await usernameInput.type(CONFIG.username);
     console.log('✏️  Typed username');
 
-    // ── Fill password ─────────────────────────────────────────────────────────
     const passwordInput = await page.$('input[type="password"]');
     if (!passwordInput) throw new Error('Password input not found');
     await passwordInput.click({ clickCount: 3 });
     await passwordInput.type(CONFIG.password);
     console.log('✏️  Typed password');
 
-    // ── Handle CAPTCHA ────────────────────────────────────────────────────────
     const captchaInput = await page.$(
       'input[placeholder="Verification Code"], ' +
       'input[placeholder*="验证码"], '            +
@@ -152,14 +137,8 @@ async function generatePickupCode() {
         await captchaInput.type(captchaText);
         console.log(`✏️  Typed CAPTCHA: "${captchaText}"`);
       }
-    } else {
-      console.log('ℹ️  No CAPTCHA field — proceeding without it');
     }
 
-    await page.screenshot({ path: 'before_login.png', fullPage: true });
-    console.log('📸 Pre-login screenshot saved → before_login.png');
-
-    // ── Click Sign In ─────────────────────────────────────────────────────────
     const loginBtn =
       (await page.$('button[type="submit"]')) ||
       (await page.$('.login-btn'))             ||
@@ -174,36 +153,48 @@ async function generatePickupCode() {
     console.log('✅ Logged in successfully');
 
     await page.screenshot({ path: 'after_login.png', fullPage: true });
-    console.log('📸 Post-login screenshot saved → after_login.png');
 
     // ── STEP 2: Navigate to 取货码管理 ────────────────────────────────────────
-    console.log('📍 Navigating to pickup code management...');
+    console.log('📍 Navigating to Transaction Management...');
 
+    // Click 交易管理 — wait for it to appear and expand
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div')];
       const target = items.find(el => el.textContent.trim() === '交易管理');
       if (target) target.click();
+      else console.log('交易管理 not found');
     });
-    await sleep(1000);
+    await sleep(1500);
 
+    await page.screenshot({ path: 'after_transaction_click.png', fullPage: true });
+    console.log('📸 After clicking 交易管理');
+
+    // Click 取货码管理
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div, a')];
       const target = items.find(el => el.textContent.trim() === '取货码管理');
       if (target) target.click();
+      else console.log('取货码管理 not found');
     });
-    await sleep(1500);
-    console.log('✅ On pickup code management page');
+    await sleep(2000);
 
     await page.screenshot({ path: 'pickup_code_page.png', fullPage: true });
+    console.log('📸 Pickup code page screenshot');
 
     // ── STEP 3: Click 添加 ────────────────────────────────────────────────────
     console.log('➕ Clicking Add button...');
-    await page.evaluate(() => {
+    const addClicked = await page.evaluate(() => {
       const btns   = [...document.querySelectorAll('button, .el-button')];
       const addBtn = btns.find(b => b.textContent.trim() === '添加');
-      if (addBtn) addBtn.click();
+      if (addBtn) { addBtn.click(); return true; }
+      // Log all button texts for debugging
+      return btns.map(b => b.textContent.trim());
     });
+    console.log('Add button result:', addClicked);
     await sleep(1500);
+
+    await page.screenshot({ path: 'after_add_click.png', fullPage: true });
+    console.log('📸 After clicking Add');
 
     // ── STEP 4: Select 随机生成 ───────────────────────────────────────────────
     console.log('🎲 Selecting Random Generate mode...');
@@ -248,28 +239,50 @@ async function generatePickupCode() {
     }, CONFIG.quantity);
     await sleep(500);
 
+    await page.screenshot({ path: 'before_submit.png', fullPage: true });
+    console.log('📸 Dialog before submit');
+
     // ── STEP 7: Confirm dialog ────────────────────────────────────────────────
     console.log('📨 Submitting form...');
-    await page.evaluate(() => {
+    const confirmClicked = await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button, .el-button')];
       const confirmBtn = btns.filter(b =>
         b.textContent.trim() === '确定' &&
         b.closest('.el-dialog, .el-dialog__footer, [class*="dialog"]')
       ).pop();
-      if (confirmBtn) confirmBtn.click();
+      if (confirmBtn) { confirmBtn.click(); return true; }
+      // Log all buttons for debugging
+      return btns.map(b => b.textContent.trim());
     });
-    await sleep(2000);
+    console.log('Confirm button result:', confirmClicked);
+    await sleep(3000); // wait longer for table to refresh
 
     await page.screenshot({ path: 'after_submit.png', fullPage: true });
+    console.log('📸 After submit');
 
     // ── STEP 8: Extract pickup code ───────────────────────────────────────────
     console.log('🔍 Extracting pickup code from table...');
+
+    // Dump full table HTML for debugging
+    const tableDebug = await page.evaluate(() => {
+      const table = document.querySelector('table, .el-table');
+      return table ? table.innerHTML.substring(0, 2000) : 'NO TABLE FOUND';
+    });
+    console.log('📋 Table HTML (first 2000 chars):', tableDebug);
+
     const result = await page.evaluate(() => {
-      const rows = [...document.querySelectorAll('table tbody tr, .el-table__row')];
-      if (!rows.length) return null;
+      // Try multiple row selectors
+      const rows =
+        [...document.querySelectorAll('.el-table__body tr')] ||
+        [...document.querySelectorAll('table tbody tr')]     ||
+        [...document.querySelectorAll('.el-table__row')];
+
+      if (!rows.length) return { error: 'no rows found' };
 
       const cells     = [...rows[0].querySelectorAll('td')];
-      const cellTexts = cells.map(c => c.textContent.trim());
+      const cellTexts = cells.map(c => c.innerText?.trim() || c.textContent?.trim());
+
+      console.log('Row 0 cells:', JSON.stringify(cellTexts));
 
       return {
         pickCode: cellTexts.find(t => /^\d{6}$/.test(t)),
@@ -278,10 +291,13 @@ async function generatePickupCode() {
       };
     });
 
+    console.log('📋 Table result:', JSON.stringify(result));
+
     if (!result?.pickCode) {
       throw new Error(
         'Could not extract pickup code from table. ' +
-        'All cells: ' + JSON.stringify(result?.allCells)
+        'All cells: ' + JSON.stringify(result?.allCells) +
+        ' Error: ' + (result?.error || 'none')
       );
     }
 
