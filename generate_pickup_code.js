@@ -6,6 +6,7 @@
 
 const puppeteer = require('puppeteer');
 const tesseract = require('node-tesseract-ocr');
+const sharp     = require('sharp');
 const fs        = require('fs');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -22,7 +23,42 @@ const CONFIG = {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
- * Solve CAPTCHA using Tesseract OCR.
+ * Preprocess CAPTCHA image for better OCR:
+ * - Scale up 3x
+ * - Convert to greyscale
+ * - Boost contrast
+ * - Threshold to pure black/white
+ */
+async function preprocessCaptcha(inputPath, outputPath) {
+  const { data, info } = await sharp(inputPath)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Convert to greyscale manually and find dark pixels (the blue digits)
+  // Blue digits have high blue channel and lower red/green
+  const width  = info.width;
+  const height = info.height;
+  const ch     = info.channels; // 3 = RGB, 4 = RGBA
+  const out    = Buffer.alloc(width * height);
+
+  for (let i = 0; i < width * height; i++) {
+    const r = data[i * ch + 0];
+    const g = data[i * ch + 1];
+    const b = data[i * ch + 2];
+
+    // Blue-dominant pixels are the digits — make them black, rest white
+    const isDigit = (b > 80) && (b > r + 20) && (b > g + 10);
+    out[i] = isDigit ? 0 : 255;
+  }
+
+  await sharp(out, { raw: { width, height, channels: 1 } })
+    .resize(width * 3, height * 3, { kernel: 'nearest' })
+    .png()
+    .toFile(outputPath);
+}
+
+/**
+ * Solve CAPTCHA using Tesseract OCR with image preprocessing.
  */
 async function solveCaptcha(page) {
   const tesseractConfig = {
@@ -56,12 +92,16 @@ async function solveCaptcha(page) {
       throw new Error('Cannot find CAPTCHA image element.');
     }
 
+    // Screenshot raw CAPTCHA
     const box = await captchaEl.boundingBox();
     await page.screenshot({
-      path: 'captcha.png',
+      path: 'captcha_raw.png',
       clip: { x: box.x, y: box.y, width: box.width, height: box.height },
     });
-    console.log('  📸 CAPTCHA screenshot captured');
+
+    // Preprocess: isolate blue digits → black on white, scale 3x
+    await preprocessCaptcha('captcha_raw.png', 'captcha.png');
+    console.log('  📸 CAPTCHA captured and preprocessed');
 
     const raw     = await tesseract.recognize('captcha.png', tesseractConfig);
     const cleaned = raw.replace(/\s+/g, '').trim();
@@ -77,7 +117,7 @@ async function solveCaptcha(page) {
     await sleep(1200);
   }
 
-  throw new Error('Tesseract OCR failed after 3 attempts.');
+  throw new Error('Tesseract OCR failed after 3 attempts. Check captcha_raw.png and captcha.png artifacts.');
 }
 
 async function generatePickupCode() {
@@ -157,29 +197,24 @@ async function generatePickupCode() {
     // ── STEP 2: Navigate to 取货码管理 ────────────────────────────────────────
     console.log('📍 Navigating to Transaction Management...');
 
-    // Click 交易管理 — wait for it to appear and expand
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div')];
       const target = items.find(el => el.textContent.trim() === '交易管理');
       if (target) target.click();
-      else console.log('交易管理 not found');
     });
     await sleep(1500);
 
     await page.screenshot({ path: 'after_transaction_click.png', fullPage: true });
-    console.log('📸 After clicking 交易管理');
 
-    // Click 取货码管理
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div, a')];
       const target = items.find(el => el.textContent.trim() === '取货码管理');
       if (target) target.click();
-      else console.log('取货码管理 not found');
     });
     await sleep(2000);
 
     await page.screenshot({ path: 'pickup_code_page.png', fullPage: true });
-    console.log('📸 Pickup code page screenshot');
+    console.log('✅ On pickup code management page');
 
     // ── STEP 3: Click 添加 ────────────────────────────────────────────────────
     console.log('➕ Clicking Add button...');
@@ -187,14 +222,12 @@ async function generatePickupCode() {
       const btns   = [...document.querySelectorAll('button, .el-button')];
       const addBtn = btns.find(b => b.textContent.trim() === '添加');
       if (addBtn) { addBtn.click(); return true; }
-      // Log all button texts for debugging
       return btns.map(b => b.textContent.trim());
     });
     console.log('Add button result:', addClicked);
     await sleep(1500);
 
     await page.screenshot({ path: 'after_add_click.png', fullPage: true });
-    console.log('📸 After clicking Add');
 
     // ── STEP 4: Select 随机生成 ───────────────────────────────────────────────
     console.log('🎲 Selecting Random Generate mode...');
@@ -240,7 +273,6 @@ async function generatePickupCode() {
     await sleep(500);
 
     await page.screenshot({ path: 'before_submit.png', fullPage: true });
-    console.log('📸 Dialog before submit');
 
     // ── STEP 7: Confirm dialog ────────────────────────────────────────────────
     console.log('📨 Submitting form...');
@@ -251,38 +283,33 @@ async function generatePickupCode() {
         b.closest('.el-dialog, .el-dialog__footer, [class*="dialog"]')
       ).pop();
       if (confirmBtn) { confirmBtn.click(); return true; }
-      // Log all buttons for debugging
       return btns.map(b => b.textContent.trim());
     });
     console.log('Confirm button result:', confirmClicked);
-    await sleep(3000); // wait longer for table to refresh
+    await sleep(3000);
 
     await page.screenshot({ path: 'after_submit.png', fullPage: true });
-    console.log('📸 After submit');
 
     // ── STEP 8: Extract pickup code ───────────────────────────────────────────
     console.log('🔍 Extracting pickup code from table...');
 
-    // Dump full table HTML for debugging
     const tableDebug = await page.evaluate(() => {
-      const table = document.querySelector('table, .el-table');
-      return table ? table.innerHTML.substring(0, 2000) : 'NO TABLE FOUND';
+      const table = document.querySelector('.el-table__body, table');
+      return table ? table.innerHTML.substring(0, 3000) : 'NO TABLE FOUND';
     });
-    console.log('📋 Table HTML (first 2000 chars):', tableDebug);
+    console.log('📋 Table HTML:', tableDebug);
 
     const result = await page.evaluate(() => {
-      // Try multiple row selectors
-      const rows =
-        [...document.querySelectorAll('.el-table__body tr')] ||
-        [...document.querySelectorAll('table tbody tr')]     ||
-        [...document.querySelectorAll('.el-table__row')];
+      const rows = [
+        ...document.querySelectorAll('.el-table__body tr'),
+        ...document.querySelectorAll('table tbody tr'),
+        ...document.querySelectorAll('.el-table__row'),
+      ];
 
       if (!rows.length) return { error: 'no rows found' };
 
       const cells     = [...rows[0].querySelectorAll('td')];
       const cellTexts = cells.map(c => c.innerText?.trim() || c.textContent?.trim());
-
-      console.log('Row 0 cells:', JSON.stringify(cellTexts));
 
       return {
         pickCode: cellTexts.find(t => /^\d{6}$/.test(t)),
