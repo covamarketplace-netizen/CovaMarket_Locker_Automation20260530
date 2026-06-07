@@ -19,6 +19,9 @@ const CONFIG = {
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Replacement for removed page.waitForTimeout
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 /**
  * Solve CAPTCHA using Tesseract OCR.
  * The CAPTCHA image uses a base64 inline src with class="code-img-wrap"
@@ -27,14 +30,13 @@ async function solveCaptcha(page) {
   const tesseractConfig = {
     lang: 'eng',
     oem:  1,
-    psm:  8,
+    psm:  7,  // treat as single line of text (better than psm 8 for 4-digit codes)
     tessedit_char_whitelist: '0123456789',
   };
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     console.log(`🧩 CAPTCHA solve attempt ${attempt}/3...`);
 
-    // Target by class or alt attribute (base64 src won't match src* selectors)
     const captchaEl = await page.$(
       'img.code-img-wrap, ' +
       'img[alt="点击刷新"], ' +
@@ -43,10 +45,9 @@ async function solveCaptcha(page) {
     );
 
     if (!captchaEl) {
-      // Dump all img info for debugging
       const allImgs = await page.evaluate(() =>
         [...document.querySelectorAll('img')].map(i => ({
-          src:       i.src.substring(0, 80), // trim base64
+          src:       i.src.substring(0, 80),
           className: i.className,
           alt:       i.alt,
           id:        i.id,
@@ -58,7 +59,17 @@ async function solveCaptcha(page) {
       throw new Error('Cannot find CAPTCHA image element. Check captcha_debug.png artifact.');
     }
 
-    await captchaEl.screenshot({ path: 'captcha.png' });
+    // Screenshot the CAPTCHA element at 3x scale for better OCR accuracy
+    const box = await captchaEl.boundingBox();
+    await page.screenshot({
+      path: 'captcha.png',
+      clip: {
+        x:      box.x,
+        y:      box.y,
+        width:  box.width,
+        height: box.height,
+      },
+    });
     console.log('  📸 CAPTCHA screenshot captured');
 
     const raw     = await tesseract.recognize('captcha.png', tesseractConfig);
@@ -70,10 +81,9 @@ async function solveCaptcha(page) {
       return cleaned;
     }
 
-    // Refresh CAPTCHA by clicking it
     console.log('  ⚠️  Result too short, refreshing CAPTCHA...');
     await captchaEl.click();
-    await page.waitForTimeout(1200);
+    await sleep(1200);
   }
 
   throw new Error('Tesseract OCR failed to read CAPTCHA after 3 attempts. Check captcha.png artifact.');
@@ -146,7 +156,6 @@ async function generatePickupCode() {
       console.log('ℹ️  No CAPTCHA field — proceeding without it');
     }
 
-    // Screenshot before clicking login
     await page.screenshot({ path: 'before_login.png', fullPage: true });
     console.log('📸 Pre-login screenshot saved → before_login.png');
 
@@ -175,14 +184,14 @@ async function generatePickupCode() {
       const target = items.find(el => el.textContent.trim() === '交易管理');
       if (target) target.click();
     });
-    await page.waitForTimeout(1000);
+    await sleep(1000);
 
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .menu-item, span, div, a')];
       const target = items.find(el => el.textContent.trim() === '取货码管理');
       if (target) target.click();
     });
-    await page.waitForTimeout(1500);
+    await sleep(1500);
     console.log('✅ On pickup code management page');
 
     await page.screenshot({ path: 'pickup_code_page.png', fullPage: true });
@@ -194,7 +203,7 @@ async function generatePickupCode() {
       const addBtn = btns.find(b => b.textContent.trim() === '添加');
       if (addBtn) addBtn.click();
     });
-    await page.waitForTimeout(1500);
+    await sleep(1500);
 
     // ── STEP 4: Select 随机生成 ───────────────────────────────────────────────
     console.log('🎲 Selecting Random Generate mode...');
@@ -203,7 +212,7 @@ async function generatePickupCode() {
       const random = labels.find(el => el.textContent.trim() === '随机生成');
       if (random) random.click();
     });
-    await page.waitForTimeout(800);
+    await sleep(800);
 
     // ── STEP 5: Select device ─────────────────────────────────────────────────
     console.log(`📦 Selecting device: ${CONFIG.device}...`);
@@ -212,14 +221,14 @@ async function generatePickupCode() {
       const deviceInput = inputs.find(el => el.placeholder?.includes('设备'));
       if (deviceInput) deviceInput.click();
     });
-    await page.waitForTimeout(800);
+    await sleep(800);
 
     await page.evaluate((deviceName) => {
       const options = [...document.querySelectorAll('.el-select-dropdown__item')];
       const option  = options.find(el => el.textContent.includes(deviceName));
       if (option) option.click();
     }, CONFIG.device);
-    await page.waitForTimeout(800);
+    await sleep(800);
 
     // ── STEP 6: Set quantity ──────────────────────────────────────────────────
     console.log(`🔢 Setting quantity to ${CONFIG.quantity}...`);
@@ -237,7 +246,7 @@ async function generatePickupCode() {
         qtyInput.dispatchEvent(new Event('change', { bubbles: true }));
       }
     }, CONFIG.quantity);
-    await page.waitForTimeout(500);
+    await sleep(500);
 
     // ── STEP 7: Confirm dialog ────────────────────────────────────────────────
     console.log('📨 Submitting form...');
@@ -249,7 +258,7 @@ async function generatePickupCode() {
       ).pop();
       if (confirmBtn) confirmBtn.click();
     });
-    await page.waitForTimeout(2000);
+    await sleep(2000);
 
     await page.screenshot({ path: 'after_submit.png', fullPage: true });
 
