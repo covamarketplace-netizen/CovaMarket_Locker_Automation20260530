@@ -29,7 +29,7 @@ jobs:
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
+          sudo apt-get install -y tesseract-ocr sharp
 
       # ── 4. Install Chrome system dependencies ────────────────────────────────
       - name: Install Chrome dependencies
