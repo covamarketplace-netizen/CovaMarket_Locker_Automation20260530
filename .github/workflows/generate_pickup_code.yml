@@ -1,9 +1,6 @@
 name: Generate XYZ Vending Pickup Code
 
 on:
-  push:
-    paths:
-      - 'orders/orders_*.json'
   workflow_dispatch:
     inputs:
       order_id:
@@ -25,41 +22,30 @@ jobs:
         with:
           node-version: 20
 
-      # ── 3. Install Tesseract OCR (system dependency) ─────────────────────────
-      - name: Install Tesseract OCR
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
-
-      # ── 4. Install Chrome system dependencies ────────────────────────────────
+      # ── 3. Install Chrome system dependencies ────────────────────────────────
       - name: Install Chrome dependencies
         run: |
+          sudo apt-get update
           sudo apt-get install -y \
-            libnss3 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libcups2 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2t64
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libxcomposite1 libxdamage1 \
+            libxrandr2 libgbm1 libasound2t64
 
-      # ── 5. Install Node dependencies ─────────────────────────────────────────
+      # ── 4. Install Node dependencies ─────────────────────────────────────────
       - name: Install Node dependencies
         run: |
           npm init -y
-          npm install puppeteer node-tesseract-ocr sharp
+          npm install puppeteer
+
+      # ── 5. Write cookies file from secret ────────────────────────────────────
+      - name: Write cookies file
+        run: echo '${{ secrets.XYZ_COOKIES }}' > cookies.json
 
       # ── 6. Validate secrets ───────────────────────────────────────────────────
       - name: Validate secrets
         run: |
-          if [ -z "${{ secrets.XYZ_USERNAME }}" ]; then
-            echo "❌ ERROR: XYZ_USERNAME secret is not set"
-            exit 1
-          fi
-          if [ -z "${{ secrets.XYZ_PASSWORD }}" ]; then
-            echo "❌ ERROR: XYZ_PASSWORD secret is not set"
+          if [ -z "${{ secrets.XYZ_COOKIES }}" ]; then
+            echo "❌ ERROR: XYZ_COOKIES secret is not set"
             exit 1
           fi
           if [ -z "${{ secrets.XYZ_DEVICE }}" ]; then
@@ -72,9 +58,8 @@ jobs:
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_USERNAME: ${{ secrets.XYZ_USERNAME }}
-          XYZ_PASSWORD: ${{ secrets.XYZ_PASSWORD }}
           XYZ_DEVICE:   ${{ secrets.XYZ_DEVICE }}
+          COOKIES_FILE: cookies.json
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
@@ -84,7 +69,6 @@ jobs:
           echo "$OUTPUT"
           echo "────────────────────────────────────────────────"
 
-          # Extract the JSON output line
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
 
           if [ -z "$JSON" ]; then
@@ -94,12 +78,11 @@ jobs:
 
           echo "result=$JSON" >> $GITHUB_OUTPUT
 
-          # Extract pickup code for subsequent steps
           PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
 
           if [ -z "$PICK_CODE" ]; then
-            echo "❌ ERROR: Failed to extract pickup code from JSON: $JSON"
+            echo "❌ ERROR: Failed to extract pickup code"
             exit 1
           fi
 
@@ -114,15 +97,13 @@ jobs:
           name: debug-artifacts
           path: |
             error_screenshot.png
-            after_login.png
+            after_load.png
             after_transaction_click.png
             pickup_code_page.png
             after_add_click.png
+            after_device_select.png
             before_submit.png
             after_submit.png
-            captcha_raw.png
-            captcha.png
-            captcha_debug.png
 
       # ── 9. Send pickup code to customer ──────────────────────────────────────
       - name: Send pickup code to customer
@@ -132,27 +113,20 @@ jobs:
           SHOPIFY_WEBHOOK_URL: ${{ secrets.SHOPIFY_WEBHOOK_URL }}
         run: |
           echo "📦 Sending pickup code $PICK_CODE to customer..."
-          # Add your notification method below — pick one:
+          # Uncomment your preferred method:
           #
-          # Option A — Trigger a Shopify flow / webhook:
+          # Option A — Shopify webhook:
           # curl -s -X POST "$SHOPIFY_WEBHOOK_URL" \
           #   -H "Content-Type: application/json" \
-          #   -d "{\"pick_code\": \"$PICK_CODE\"}"
+          #   -d "{\"pick_code\": \"$PICK_CODE\", \"order_id\": \"${{ github.event.inputs.order_id }}\"}"
           #
-          # Option B — Send WhatsApp via Twilio:
-          # curl -s -X POST "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_SID/Messages.json" \
-          #   --data-urlencode "To=whatsapp:+60XXXXXXXXX" \
-          #   --data-urlencode "From=whatsapp:$TWILIO_WHATSAPP_FROM" \
-          #   --data-urlencode "Body=Your pickup code is: $PICK_CODE" \
-          #   -u "$TWILIO_SID:$TWILIO_AUTH_TOKEN"
-          #
-          # Option C — POST to Make.com / Zapier webhook:
+          # Option B — Make.com / Zapier:
           # curl -s -X POST "https://hook.make.com/YOUR_HOOK_ID" \
           #   -H "Content-Type: application/json" \
           #   -d "{\"pick_code\": \"$PICK_CODE\", \"order_id\": \"${{ github.event.inputs.order_id }}\"}"
           echo "PICK_CODE=$PICK_CODE" >> $GITHUB_ENV
 
-      # ── 10. Save pickup code result to repo ──────────────────────────────────
+      # ── 10. Save result to repo ───────────────────────────────────────────────
       - name: Save pickup code result
         if: success()
         run: |
