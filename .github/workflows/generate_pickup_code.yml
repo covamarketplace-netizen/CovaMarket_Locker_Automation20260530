@@ -113,8 +113,15 @@ jobs:
         with:
           name: debug-artifacts
           path: |
-            error_screenshot.png
-            captcha.png
+               error_screenshot.png
+               after_login.png
+               after_transaction_click.png
+               pickup_code_page.png
+               after_add_click.png
+               before_submit.png
+               after_submit.png
+               captcha.png
+               captcha_debug.png
 
       # ── 9. Send pickup code to customer ──────────────────────────────────────
       - name: Send pickup code to customer
