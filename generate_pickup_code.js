@@ -22,31 +22,20 @@ const CONFIG = {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-/**
- * Preprocess CAPTCHA image for better OCR:
- * - Scale up 3x
- * - Convert to greyscale
- * - Boost contrast
- * - Threshold to pure black/white
- */
 async function preprocessCaptcha(inputPath, outputPath) {
   const { data, info } = await sharp(inputPath)
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  // Convert to greyscale manually and find dark pixels (the blue digits)
-  // Blue digits have high blue channel and lower red/green
   const width  = info.width;
   const height = info.height;
-  const ch     = info.channels; // 3 = RGB, 4 = RGBA
+  const ch     = info.channels;
   const out    = Buffer.alloc(width * height);
 
   for (let i = 0; i < width * height; i++) {
     const r = data[i * ch + 0];
     const g = data[i * ch + 1];
     const b = data[i * ch + 2];
-
-    // Blue-dominant pixels are the digits — make them black, rest white
     const isDigit = (b > 80) && (b > r + 20) && (b > g + 10);
     out[i] = isDigit ? 0 : 255;
   }
@@ -57,9 +46,6 @@ async function preprocessCaptcha(inputPath, outputPath) {
     .toFile(outputPath);
 }
 
-/**
- * Solve CAPTCHA using Tesseract OCR with image preprocessing.
- */
 async function solveCaptcha(page) {
   const tesseractConfig = {
     lang: 'eng',
@@ -92,14 +78,12 @@ async function solveCaptcha(page) {
       throw new Error('Cannot find CAPTCHA image element.');
     }
 
-    // Screenshot raw CAPTCHA
     const box = await captchaEl.boundingBox();
     await page.screenshot({
       path: 'captcha_raw.png',
       clip: { x: box.x, y: box.y, width: box.width, height: box.height },
     });
 
-    // Preprocess: isolate blue digits → black on white, scale 3x
     await preprocessCaptcha('captcha_raw.png', 'captcha.png');
     console.log('  📸 CAPTCHA captured and preprocessed');
 
@@ -117,7 +101,7 @@ async function solveCaptcha(page) {
     await sleep(1200);
   }
 
-  throw new Error('Tesseract OCR failed after 3 attempts. Check captcha_raw.png and captcha.png artifacts.');
+  throw new Error('Tesseract OCR failed after 3 attempts.');
 }
 
 async function generatePickupCode() {
@@ -197,18 +181,38 @@ async function generatePickupCode() {
     // ── STEP 2: Navigate to 取货码管理 ────────────────────────────────────────
     console.log('📍 Navigating to Transaction Management...');
 
+    // Dump sidebar items for debugging
+    const menuItems = await page.evaluate(() =>
+      [...document.querySelectorAll('li, .el-menu-item, .el-submenu__title, span, div, a')]
+        .filter(el => {
+          const t = el.textContent.trim();
+          return t.length > 1 && t.length < 20;
+        })
+        .map(el => ({ tag: el.tagName, text: el.textContent.trim(), className: el.className }))
+        .slice(0, 60)
+    );
+    console.log('📋 Menu items:', JSON.stringify(menuItems, null, 2));
+
+    // Click 交易管理 using contains match
     await page.evaluate(() => {
-      const items = [...document.querySelectorAll('li, .menu-item, span, div')];
-      const target = items.find(el => el.textContent.trim() === '交易管理');
+      const items = [...document.querySelectorAll('li, .el-submenu__title, .el-menu-item, span, div')];
+      const target = items.find(el =>
+        el.childElementCount <= 3 &&
+        el.textContent.trim().includes('交易管理')
+      );
       if (target) target.click();
     });
     await sleep(1500);
 
     await page.screenshot({ path: 'after_transaction_click.png', fullPage: true });
 
+    // Click 取货码管理 using contains match
     await page.evaluate(() => {
-      const items = [...document.querySelectorAll('li, .menu-item, span, div, a')];
-      const target = items.find(el => el.textContent.trim() === '取货码管理');
+      const items = [...document.querySelectorAll('li, .el-menu-item, .el-submenu__title, span, div, a')];
+      const target = items.find(el =>
+        el.childElementCount <= 3 &&
+        el.textContent.trim().includes('取货码管理')
+      );
       if (target) target.click();
     });
     await sleep(2000);
@@ -219,10 +223,14 @@ async function generatePickupCode() {
     // ── STEP 3: Click 添加 ────────────────────────────────────────────────────
     console.log('➕ Clicking Add button...');
     const addClicked = await page.evaluate(() => {
-      const btns   = [...document.querySelectorAll('button, .el-button')];
-      const addBtn = btns.find(b => b.textContent.trim() === '添加');
+      // Try multiple selectors for the Add button
+      const btns = [...document.querySelectorAll('button, .el-button, a, div')];
+      const addBtn = btns.find(b =>
+        b.textContent.trim() === '添加' ||
+        b.textContent.trim().includes('添加')
+      );
       if (addBtn) { addBtn.click(); return true; }
-      return btns.map(b => b.textContent.trim());
+      return btns.map(b => b.textContent.trim()).filter(t => t.length > 0 && t.length < 15);
     });
     console.log('Add button result:', addClicked);
     await sleep(1500);
@@ -232,8 +240,8 @@ async function generatePickupCode() {
     // ── STEP 4: Select 随机生成 ───────────────────────────────────────────────
     console.log('🎲 Selecting Random Generate mode...');
     await page.evaluate(() => {
-      const labels = [...document.querySelectorAll('label, span, .el-radio__label')];
-      const random = labels.find(el => el.textContent.trim() === '随机生成');
+      const labels = [...document.querySelectorAll('label, span, .el-radio__label, div')];
+      const random = labels.find(el => el.textContent.trim().includes('随机生成'));
       if (random) random.click();
     });
     await sleep(800);
@@ -241,14 +249,17 @@ async function generatePickupCode() {
     // ── STEP 5: Select device ─────────────────────────────────────────────────
     console.log(`📦 Selecting device: ${CONFIG.device}...`);
     await page.evaluate(() => {
-      const inputs      = [...document.querySelectorAll('.el-select .el-input__inner')];
-      const deviceInput = inputs.find(el => el.placeholder?.includes('设备'));
+      const inputs = [...document.querySelectorAll('.el-select .el-input__inner, input')];
+      const deviceInput = inputs.find(el =>
+        el.placeholder?.includes('设备') ||
+        el.placeholder?.includes('device')
+      );
       if (deviceInput) deviceInput.click();
     });
     await sleep(800);
 
     await page.evaluate((deviceName) => {
-      const options = [...document.querySelectorAll('.el-select-dropdown__item')];
+      const options = [...document.querySelectorAll('.el-select-dropdown__item, li')];
       const option  = options.find(el => el.textContent.includes(deviceName));
       if (option) option.click();
     }, CONFIG.device);
@@ -283,7 +294,7 @@ async function generatePickupCode() {
         b.closest('.el-dialog, .el-dialog__footer, [class*="dialog"]')
       ).pop();
       if (confirmBtn) { confirmBtn.click(); return true; }
-      return btns.map(b => b.textContent.trim());
+      return btns.map(b => b.textContent.trim()).filter(t => t.length > 0 && t.length < 15);
     });
     console.log('Confirm button result:', confirmClicked);
     await sleep(3000);
