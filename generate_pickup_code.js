@@ -6,7 +6,6 @@
 
 const puppeteer = require('puppeteer');
 const tesseract = require('node-tesseract-ocr');
-const sharp     = require('sharp');
 const fs        = require('fs');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -22,40 +21,15 @@ const CONFIG = {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function preprocessCaptcha(inputPath, outputPath) {
-  const { data, info } = await sharp(inputPath)
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const width  = info.width;
-  const height = info.height;
-  const ch     = info.channels;
-  const out    = Buffer.alloc(width * height);
-
-  for (let i = 0; i < width * height; i++) {
-    const r = data[i * ch + 0];
-    const g = data[i * ch + 1];
-    const b = data[i * ch + 2];
-    const isDigit = (b > 80) && (b > r + 20) && (b > g + 10);
-    out[i] = isDigit ? 0 : 255;
-  }
-
-  await sharp(out, { raw: { width, height, channels: 1 } })
-    .resize(width * 3, height * 3, { kernel: 'nearest' })
-    .png()
-    .toFile(outputPath);
-}
-
+/**
+ * Solve CAPTCHA — try multiple PSM modes until one gives 4 digits
+ */
 async function solveCaptcha(page) {
-  const tesseractConfig = {
-    lang: 'eng',
-    oem:  1,
-    psm:  7,
-    tessedit_char_whitelist: '0123456789',
-  };
+  // Try different PSM modes — psm 7 and 8 work best for short digit strings
+  const psmModes = [7, 8, 6, 13];
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`🧩 CAPTCHA solve attempt ${attempt}/3...`);
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    console.log(`🧩 CAPTCHA solve attempt ${attempt}/4...`);
 
     const captchaEl = await page.$(
       'img.code-img-wrap, ' +
@@ -74,34 +48,52 @@ async function solveCaptcha(page) {
         }))
       );
       console.log('  ⚠️  No CAPTCHA img found. All imgs:', JSON.stringify(allImgs, null, 2));
-      await page.screenshot({ path: 'captcha_debug.png', fullPage: true });
       throw new Error('Cannot find CAPTCHA image element.');
     }
 
+    // Screenshot at 2x device scale for better resolution
     const box = await captchaEl.boundingBox();
     await page.screenshot({
-      path: 'captcha_raw.png',
-      clip: { x: box.x, y: box.y, width: box.width, height: box.height },
+      path: 'captcha.png',
+      clip: {
+        x:      Math.max(0, box.x - 2),
+        y:      Math.max(0, box.y - 2),
+        width:  box.width  + 4,
+        height: box.height + 4,
+      },
     });
+    console.log(`  📸 CAPTCHA screenshot captured (${Math.round(box.width)}x${Math.round(box.height)})`);
 
-    await preprocessCaptcha('captcha_raw.png', 'captcha.png');
-    console.log('  📸 CAPTCHA captured and preprocessed');
+    // Try each PSM mode on the same screenshot
+    for (const psm of psmModes) {
+      const config = {
+        lang: 'eng',
+        oem:  1,
+        psm,
+        tessedit_char_whitelist: '0123456789',
+      };
 
-    const raw     = await tesseract.recognize('captcha.png', tesseractConfig);
-    const cleaned = raw.replace(/\s+/g, '').trim();
-    console.log(`  🔍 OCR raw: "${raw.trim()}" → cleaned: "${cleaned}"`);
+      try {
+        const raw     = await tesseract.recognize('captcha.png', config);
+        const cleaned = raw.replace(/\s+/g, '').trim();
+        console.log(`  🔍 PSM ${psm} → raw: "${raw.trim()}" cleaned: "${cleaned}"`);
 
-    if (cleaned.length >= 4) {
-      console.log(`  ✅ CAPTCHA solved: "${cleaned}"`);
-      return cleaned;
+        if (cleaned.length >= 4) {
+          console.log(`  ✅ CAPTCHA solved with PSM ${psm}: "${cleaned}"`);
+          return cleaned;
+        }
+      } catch (e) {
+        console.log(`  ⚠️  PSM ${psm} error: ${e.message}`);
+      }
     }
 
-    console.log('  ⚠️  Result too short, refreshing CAPTCHA...');
+    // All PSM modes failed — refresh and try again
+    console.log('  ⚠️  All PSM modes failed, refreshing CAPTCHA...');
     await captchaEl.click();
-    await sleep(1200);
+    await sleep(1500);
   }
 
-  throw new Error('Tesseract OCR failed after 3 attempts.');
+  throw new Error('Tesseract OCR failed after 4 attempts with all PSM modes. Check captcha.png artifact.');
 }
 
 async function generatePickupCode() {
@@ -181,7 +173,6 @@ async function generatePickupCode() {
     // ── STEP 2: Navigate to 取货码管理 ────────────────────────────────────────
     console.log('📍 Navigating to Transaction Management...');
 
-    // Dump sidebar items for debugging
     const menuItems = await page.evaluate(() =>
       [...document.querySelectorAll('li, .el-menu-item, .el-submenu__title, span, div, a')]
         .filter(el => {
@@ -193,7 +184,6 @@ async function generatePickupCode() {
     );
     console.log('📋 Menu items:', JSON.stringify(menuItems, null, 2));
 
-    // Click 交易管理 using contains match
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .el-submenu__title, .el-menu-item, span, div')];
       const target = items.find(el =>
@@ -206,7 +196,6 @@ async function generatePickupCode() {
 
     await page.screenshot({ path: 'after_transaction_click.png', fullPage: true });
 
-    // Click 取货码管理 using contains match
     await page.evaluate(() => {
       const items = [...document.querySelectorAll('li, .el-menu-item, .el-submenu__title, span, div, a')];
       const target = items.find(el =>
@@ -223,12 +212,8 @@ async function generatePickupCode() {
     // ── STEP 3: Click 添加 ────────────────────────────────────────────────────
     console.log('➕ Clicking Add button...');
     const addClicked = await page.evaluate(() => {
-      // Try multiple selectors for the Add button
       const btns = [...document.querySelectorAll('button, .el-button, a, div')];
-      const addBtn = btns.find(b =>
-        b.textContent.trim() === '添加' ||
-        b.textContent.trim().includes('添加')
-      );
+      const addBtn = btns.find(b => b.textContent.trim().includes('添加'));
       if (addBtn) { addBtn.click(); return true; }
       return btns.map(b => b.textContent.trim()).filter(t => t.length > 0 && t.length < 15);
     });
