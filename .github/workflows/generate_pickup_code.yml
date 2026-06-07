@@ -120,6 +120,7 @@ jobs:
                after_add_click.png
                before_submit.png
                after_submit.png
+               captcha_raw.png
                captcha.png
                captcha_debug.png
 
