@@ -1,33 +1,25 @@
 /**
  * generate_pickup_code.js
- * Calls XYZ Vending internal API directly using JWT token.
+ * Uses stored JWT token directly — no login needed.
+ * Token is stored as XYZ_TOKEN GitHub Secret.
  *
  * Flow:
- *   1. Login → get JWT token
- *   2. Auto-detect available channel (roadId with stock > 0)
+ *   1. Use JWT token from env
+ *   2. Auto-detect available channel (stock > 0)
  *   3. Call addPickInfo → get 6-digit pickup code
- *   4. Output result as JSON
- *
- * Optional env vars:
- *   XYZ_GOODS_ID  — force a specific product (default: auto-detect first available)
- *   XYZ_ROAD_ID   — force a specific channel  (default: auto-detect first with stock)
  */
 
 const https = require('https');
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
 const CONFIG = {
   baseUrl:     'https://xzyvend.com',
-  username:    process.env.XYZ_USERNAME || '0108668014',
-  password:    process.env.XYZ_PASSWORD || '',
-  funId:       parseInt(process.env.XYZ_FUN_ID  || '716'),
-  // Optional overrides — if not set, script auto-detects
+  token:       process.env.XYZ_TOKEN   || '',
+  funId:       parseInt(process.env.XYZ_FUN_ID || '716'),
   goodsId:     process.env.XYZ_GOODS_ID ? parseInt(process.env.XYZ_GOODS_ID) : null,
   roadId:      process.env.XYZ_ROAD_ID  ? parseInt(process.env.XYZ_ROAD_ID)  : null,
   generateNum: 1,
   pickType:    0,
 };
-// ─────────────────────────────────────────────────────────────────────────────
 
 function request(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
@@ -42,8 +34,8 @@ function request(url, options = {}, body = null) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try { resolve({ status: res.status, headers: res.headers, body: JSON.parse(data) }); }
-        catch { resolve({ status: res.statusCode, headers: res.headers, body: data }); }
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
       });
     });
     req.on('error', reject);
@@ -52,201 +44,128 @@ function request(url, options = {}, body = null) {
   });
 }
 
-// ─── STEP 1: Login ───────────────────────────────────────────────────────────
-async function login() {
-  console.log('🔐 Logging in as', CONFIG.username);
-  const res = await request(
-    `${CONFIG.baseUrl}/api/login`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent':   'Mozilla/5.0',
-        'Origin':       CONFIG.baseUrl,
-        'Referer':      `${CONFIG.baseUrl}/`,
-      },
-    },
-    { username: CONFIG.username, password: CONFIG.password }
-  );
-
-  console.log('Login status:', res.status);
-  console.log('Login body:', JSON.stringify(res.body));
-
-  const token = res.body?.token      ||
-                res.body?.data?.token ||
-                res.headers?.authorization;
-
-  if (!token) throw new Error('Login failed — no token. Body: ' + JSON.stringify(res.body));
-  console.log('✅ Logged in');
-  return token;
+function authHeaders() {
+  return {
+    'Authorization': CONFIG.token,
+    'Cookie':        `Admin-Token=${CONFIG.token}`,
+    'Content-Type':  'application/json;charset=UTF-8',
+    'User-Agent':    'Mozilla/5.0',
+    'Accept':        'application/json, text/plain, */*',
+    'Origin':        CONFIG.baseUrl,
+    'Referer':       `${CONFIG.baseUrl}/transactionManagement/pickUpCodeManagement`,
+  };
 }
 
-// ─── STEP 2: Auto-detect available channel ───────────────────────────────────
-async function detectChannel(token) {
-  // If both are manually set, skip detection
+// Auto-detect first available channel with stock > 0
+async function detectChannel() {
   if (CONFIG.goodsId && CONFIG.roadId) {
     console.log(`📦 Using fixed channel — goodsId=${CONFIG.goodsId}, roadId=${CONFIG.roadId}`);
     return { goodsId: CONFIG.goodsId, roadId: CONFIG.roadId };
   }
 
-  console.log('\n🔍 Auto-detecting available channel...');
-
+  console.log('🔍 Auto-detecting available channel...');
   const res = await request(
     `${CONFIG.baseUrl}/api/road/getRoadGoodsByFunId?funId=${CONFIG.funId}`,
-    {
-      method: 'GET',
-      headers: {
-        'Authorization': token,
-        'Cookie':        `Admin-Token=${token}`,
-        'User-Agent':    'Mozilla/5.0',
-        'Accept':        'application/json',
-        'Referer':       `${CONFIG.baseUrl}/transactionManagement/pickUpCodeManagement`,
-      },
-    }
+    { method: 'GET', headers: authHeaders() }
   );
 
-  console.log('Channels response status:', res.status);
+  console.log('Channels status:', res.status);
   console.log('Channels data:', JSON.stringify(res.body));
 
-  // Find first channel with stock > 0
   const roads = res.body?.data || res.body?.rows || res.body || [];
   const available = Array.isArray(roads)
     ? roads.filter(r => (r.roadStock || r.stock || r.goodsNum || 0) > 0)
     : [];
 
-  console.log(`Found ${roads.length} channels, ${available.length} with stock`);
-
-  if (!available.length) {
-    throw new Error('No channels with available stock found! Please restock the machine first.');
-  }
-
-  // Log all available channels
+  console.log(`Found ${Array.isArray(roads) ? roads.length : 0} channels, ${available.length} with stock`);
   available.forEach(r => {
-    console.log(`  Channel ${r.roadColumn}-${r.roadRow} | roadId=${r.id || r.roadId} | goodsId=${r.goodsId} | stock=${r.roadStock || r.stock || r.goodsNum}`);
+    console.log(`  Channel ${r.roadColumn}-${r.roadRow} | roadId=${r.id||r.roadId} | goodsId=${r.goodsId} | stock=${r.roadStock||r.stock||r.goodsNum}`);
   });
 
-  // Pick the first available one
-  const channel = available[0];
-  const result = {
-    goodsId: CONFIG.goodsId || channel.goodsId,
-    roadId:  CONFIG.roadId  || channel.id || channel.roadId,
-    stock:   channel.roadStock || channel.stock || channel.goodsNum,
-    column:  channel.roadColumn,
-    row:     channel.roadRow,
-  };
+  if (!available.length) throw new Error('No channels with stock! Please restock the machine.');
 
-  console.log(`✅ Selected channel: goodsId=${result.goodsId}, roadId=${result.roadId}, stock=${result.stock}`);
-  return result;
+  const ch = available[0];
+  return {
+    goodsId: ch.goodsId,
+    roadId:  ch.id || ch.roadId,
+    stock:   ch.roadStock || ch.stock || ch.goodsNum,
+    column:  ch.roadColumn,
+    row:     ch.roadRow,
+  };
 }
 
-// ─── STEP 3: Create pickup code ───────────────────────────────────────────────
-async function addPickInfo(token, channel) {
-  console.log('\n🎟️  Calling addPickInfo...');
-
+// Create pickup code
+async function addPickInfo(channel) {
+  console.log('\n🎟️  Creating pickup code...');
   const body = {
     funId:         CONFIG.funId,
     pickType:      CONFIG.pickType,
     generateNum:   CONFIG.generateNum,
-    goodsPickList: [{
-      goodsId: channel.goodsId,
-      roadId:  channel.roadId,
-    }],
+    goodsPickList: [{ goodsId: channel.goodsId, roadId: channel.roadId }],
   };
-
   console.log('Request body:', JSON.stringify(body));
 
   const res = await request(
     `${CONFIG.baseUrl}/api/pickInfo/addPickInfo`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type':  'application/json;charset=UTF-8',
-        'Authorization': token,
-        'Cookie':        `Admin-Token=${token}`,
-        'User-Agent':    'Mozilla/5.0',
-        'Origin':        CONFIG.baseUrl,
-        'Referer':       `${CONFIG.baseUrl}/transactionManagement/pickUpCodeManagement`,
-        'Accept':        'application/json, text/plain, */*',
-      },
-    },
+    { method: 'POST', headers: authHeaders() },
     body
   );
-
-  console.log('addPickInfo status:', res.status);
-  console.log('addPickInfo response:', JSON.stringify(res.body));
+  console.log('Response status:', res.status);
+  console.log('Response body:', JSON.stringify(res.body));
   return res.body;
 }
 
-// ─── STEP 4: Fetch latest pickup code if not in response ─────────────────────
-async function getLatestPickCode(token) {
+// Fetch latest from list if not in response
+async function getLatestPickCode() {
   const res = await request(
     `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=1`,
-    {
-      method: 'GET',
-      headers: {
-        'Authorization': token,
-        'Cookie':        `Admin-Token=${token}`,
-        'User-Agent':    'Mozilla/5.0',
-        'Accept':        'application/json',
-      },
-    }
+    { method: 'GET', headers: authHeaders() }
   );
   const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
   return Array.isArray(records) && records.length ? records[0] : null;
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function main() {
   try {
-    const token   = await login();
-    const channel = await detectChannel(token);
-    const result  = await addPickInfo(token, channel);
+    if (!CONFIG.token) throw new Error('XYZ_TOKEN secret is not set!');
+    console.log('🔑 Using stored JWT token');
 
-    // Extract pickup code
-    let pickCode = null;
-    let orderNo  = null;
+    const channel = await detectChannel();
+    const result  = await addPickInfo(channel);
 
-    if (result?.data?.pickCode) {
-      pickCode = result.data.pickCode;
-      orderNo  = result.data.pickOrderNum || result.data.orderNo;
-    } else if (Array.isArray(result?.data) && result.data[0]?.pickCode) {
-      pickCode = result.data[0].pickCode;
-      orderNo  = result.data[0].pickOrderNum;
-    } else if (result?.pickCode) {
-      pickCode = result.pickCode;
-    } else {
-      console.log('⚠️  pickCode not in response, checking list...');
-      const latest = await getLatestPickCode(token);
-      if (latest?.pickCode) {
-        pickCode = latest.pickCode;
-        orderNo  = latest.pickOrderNum;
-      }
-    }
+    // Extract pickup code from response
+    let pickCode = result?.data?.pickCode
+      || (Array.isArray(result?.data) && result.data[0]?.pickCode)
+      || result?.pickCode
+      || null;
+
+    let orderNo = result?.data?.pickOrderNum
+      || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
+      || null;
 
     if (!pickCode) {
-      throw new Error('No pickup code found. Response: ' + JSON.stringify(result));
+      console.log('⚠️  Not in response — checking list...');
+      const latest = await getLatestPickCode();
+      if (latest?.pickCode) { pickCode = latest.pickCode; orderNo = latest.pickOrderNum; }
     }
+
+    if (!pickCode) throw new Error('No pickup code found. Response: ' + JSON.stringify(result));
 
     console.log('\n═══════════════════════════════════');
     console.log(`✅ PICKUP CODE : ${pickCode}`);
     console.log(`📋 ORDER NO   : ${orderNo || 'N/A'}`);
-    console.log(`📦 CHANNEL    : ${channel.column}-${channel.row} (roadId=${channel.roadId})`);
-    console.log(`🛒 PRODUCT    : goodsId=${channel.goodsId}`);
+    console.log(`📦 CHANNEL    : ${channel.column}-${channel.row}`);
     console.log('═══════════════════════════════════\n');
 
-    const output = {
-      success:     true,
-      pickCode,
-      orderNo,
-      funId:       CONFIG.funId,
-      goodsId:     channel.goodsId,
-      roadId:      channel.roadId,
-      generatedAt: new Date().toISOString(),
-    };
+    const output = { success: true, pickCode, orderNo, funId: CONFIG.funId, goodsId: channel.goodsId, roadId: channel.roadId, generatedAt: new Date().toISOString() };
     console.log('OUTPUT_JSON:' + JSON.stringify(output));
 
   } catch (err) {
     console.error('❌ Error:', err.message);
+    // Check if token expired
+    if (err.message.includes('expired') || err.message.includes('token') || err.message.includes('401')) {
+      console.error('💡 Token may have expired. Re-export cookies from browser and update XYZ_TOKEN secret.');
+    }
     console.log('OUTPUT_JSON:' + JSON.stringify({ success: false, error: err.message }));
     process.exit(1);
   }
