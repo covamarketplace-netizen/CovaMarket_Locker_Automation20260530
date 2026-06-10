@@ -1,139 +1,68 @@
 name: Generate XYZ Vending Pickup Code
 
 on:
+  push:
+    paths:
+      - 'orders/orders_*.json'
   workflow_dispatch:
     inputs:
       order_id:
         description: 'Shopify Order ID'
-        required: true
+        required: false
+        default: 'test-order'
 
 jobs:
   generate-pickup-code:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout repo ────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Setup Node.js ─────────────────────────────────────────────────────
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      # ── 3. Install Chrome system dependencies ────────────────────────────────
-      - name: Install Chrome dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 \
-            libcups2 libxcomposite1 libxdamage1 \
-            libxrandr2 libgbm1 libasound2t64
+      - name: Install dependencies
+        run: npm init -y && npm install
 
-      # ── 4. Install Node dependencies ─────────────────────────────────────────
-      - name: Install Node dependencies
-        run: |
-          npm init -y
-          npm install puppeteer
-
-      # ── 5. Write cookies file from secret ────────────────────────────────────
-      - name: Write cookies file
-        run: echo '${{ secrets.XYZ_COOKIES }}' > cookies.json
-
-      # ── 6. Validate secrets ───────────────────────────────────────────────────
-      - name: Validate secrets
-        run: |
-          if [ -z "${{ secrets.XYZ_COOKIES }}" ]; then
-            echo "❌ ERROR: XYZ_COOKIES secret is not set"
-            exit 1
-          fi
-          if [ -z "${{ secrets.XYZ_DEVICE }}" ]; then
-            echo "❌ ERROR: XYZ_DEVICE secret is not set"
-            exit 1
-          fi
-          echo "✅ All secrets are present"
-
-      # ── 7. Generate pickup code ───────────────────────────────────────────────
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_DEVICE:   ${{ secrets.XYZ_DEVICE }}
-          COOKIES_FILE: cookies.json
+          XYZ_USERNAME: ${{ secrets.XYZ_USERNAME }}
+          XYZ_PASSWORD: ${{ secrets.XYZ_PASSWORD }}
+          XYZ_FUN_ID:   ${{ secrets.XYZ_FUN_ID }}
+          XYZ_GOODS_ID: ${{ secrets.XYZ_GOODS_ID }}
+          XYZ_ROAD_ID:  ${{ secrets.XYZ_ROAD_ID }}
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
-          EXIT_CODE=$?
-
-          echo "──────────────── Node.js Output ────────────────"
+          echo "──────── Output ────────"
           echo "$OUTPUT"
-          echo "────────────────────────────────────────────────"
-
+          echo "────────────────────────"
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
-
-          if [ -z "$JSON" ]; then
-            echo "❌ ERROR: No OUTPUT_JSON line found in script output"
-            exit 1
-          fi
-
           echo "result=$JSON" >> $GITHUB_OUTPUT
-
           PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
-
-          if [ -z "$PICK_CODE" ]; then
-            echo "❌ ERROR: Failed to extract pickup code"
-            exit 1
-          fi
-
           echo "✅ Pickup code: $PICK_CODE"
-          exit $EXIT_CODE
 
-      # ── 8. Upload debug artifacts on failure ─────────────────────────────────
-      - name: Upload debug artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-artifacts
-          path: |
-            error_screenshot.png
-            after_load.png
-            after_transaction_click.png
-            pickup_code_page.png
-            after_add_click.png
-            after_device_select.png
-            before_submit.png
-            after_submit.png
-
-      # ── 9. Send pickup code to customer ──────────────────────────────────────
       - name: Send pickup code to customer
-        if: success()
+        if: success() && steps.generate.outputs.pick_code != ''
         env:
-          PICK_CODE:           ${{ steps.generate.outputs.pick_code }}
-          SHOPIFY_WEBHOOK_URL: ${{ secrets.SHOPIFY_WEBHOOK_URL }}
+          PICK_CODE: ${{ steps.generate.outputs.pick_code }}
+          ORDER_ID:  ${{ github.event.inputs.order_id }}
         run: |
-          echo "📦 Sending pickup code $PICK_CODE to customer..."
-          # Uncomment your preferred method:
-          #
-          # Option A — Shopify webhook:
-          # curl -s -X POST "$SHOPIFY_WEBHOOK_URL" \
-          #   -H "Content-Type: application/json" \
-          #   -d "{\"pick_code\": \"$PICK_CODE\", \"order_id\": \"${{ github.event.inputs.order_id }}\"}"
-          #
-          # Option B — Make.com / Zapier:
-          # curl -s -X POST "https://hook.make.com/YOUR_HOOK_ID" \
-          #   -H "Content-Type: application/json" \
-          #   -d "{\"pick_code\": \"$PICK_CODE\", \"order_id\": \"${{ github.event.inputs.order_id }}\"}"
-          echo "PICK_CODE=$PICK_CODE" >> $GITHUB_ENV
+          echo "📦 Pickup code $PICK_CODE for order $ORDER_ID"
+          # Add WhatsApp/email notification here
 
-      # ── 10. Save result to repo ───────────────────────────────────────────────
-      - name: Save pickup code result
-        if: success()
+      - name: Save result
+        if: success() && steps.generate.outputs.pick_code != ''
         run: |
           mkdir -p pickup_codes
           echo '${{ steps.generate.outputs.result }}' > pickup_codes/latest.json
-          git config user.name  "github-actions"
+          git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add pickup_codes/
-          git diff --staged --quiet || git commit -m "Add pickup code ${{ steps.generate.outputs.pick_code }}"
+          git diff --staged --quiet || git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} for order ${{ github.event.inputs.order_id }}"
           git push
