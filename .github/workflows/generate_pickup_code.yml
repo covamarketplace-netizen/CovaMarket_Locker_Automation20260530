@@ -30,11 +30,8 @@ jobs:
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_USERNAME: ${{ secrets.XYZ_USERNAME }}
-          XYZ_PASSWORD: ${{ secrets.XYZ_PASSWORD }}
-          XYZ_FUN_ID:   ${{ secrets.XYZ_FUN_ID }}
-          XYZ_GOODS_ID: ${{ secrets.XYZ_GOODS_ID }}
-          XYZ_ROAD_ID:  ${{ secrets.XYZ_ROAD_ID }}
+          XYZ_TOKEN:  ${{ secrets.XYZ_TOKEN }}
+          XYZ_FUN_ID: ${{ secrets.XYZ_FUN_ID }}
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
