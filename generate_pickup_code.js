@@ -15,6 +15,10 @@
  * - Call addPickInfo.
  * - After: poll a TARGETED query (goodsName filter + status=0) for a new orderNum
  *   that wasn't in the before-snapshot. This avoids all global list cache issues.
+ *
+ * FIX (2026-06-15): locker label was built as column-row; corrected to row-column
+ *   to match XYZ Vending UI display format (e.g. "2-1" = row 2, column 1).
+ *   mkLocker() now returns lockerLabel as single source of truth.
  */
 
 const https = require('https');
@@ -239,7 +243,8 @@ async function findFreeLocker(channels, pendingLockerNames) {
     const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
     const hasPending = pendingLockerNames.has(lockerName);
     const isActive   = activeRoadIds.has(String(ch.roadId));
-    console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingAPI=${hasPending} | inTracker=${isActive}`);
+    // FIX: display as row-column to match UI
+    console.log(`  ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingAPI=${hasPending} | inTracker=${isActive}`);
   });
 
   const free = channels.filter(ch => {
@@ -257,17 +262,29 @@ async function findFreeLocker(channels, pendingLockerNames) {
       return stock > 0 && !pendingLockerNames.has(lockerName);
     });
     if (!free2.length) throw new Error('No free lockers available!');
-    const ch = free2[0];
-    return mkLocker(ch);
+    return mkLocker(free2[0]);
   }
 
   return mkLocker(free[0]);
 }
 
+/**
+ * Build locker object from a channel record.
+ * lockerLabel = "row-column" (e.g. "2-1") — matches XYZ Vending UI.
+ * lockerName  = "Locker row-column"        — used for API goodsName filter.
+ */
 function mkLocker(ch) {
-  const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
+  const lockerLabel = `${ch.roadRow}-${ch.roadColumn}`;   // ✅ FIX: row-column
+  const lockerName  = `Locker ${lockerLabel}`;
   console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
-  return { goodsId: ch.goodsId, roadId: ch.roadId, column: ch.roadColumn, row: ch.roadRow, lockerName };
+  return {
+    goodsId:     ch.goodsId,
+    roadId:      ch.roadId,
+    row:         ch.roadRow,
+    column:      ch.roadColumn,
+    lockerLabel,   // single source of truth for output (e.g. "2-1")
+    lockerName,    // used for API queries (e.g. "Locker 2-1")
+  };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -277,9 +294,9 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    const channels          = await getAllChannels();
+    const channels           = await getAllChannels();
     const pendingLockerNames = await getPendingLockerNames();
-    const locker            = await findFreeLocker(channels, pendingLockerNames);
+    const locker             = await findFreeLocker(channels, pendingLockerNames);
 
     // ── Snapshot BEFORE ───────────────────────────────────────────────────────
     const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker.lockerName);
@@ -323,7 +340,7 @@ async function main() {
     activeLockers[locker.roadId] = {
       pickCode,
       orderNo:   orderNo || null,
-      locker:    `${locker.column}-${locker.row}`,
+      locker:    locker.lockerLabel,   // ✅ FIX: was column-row, now row-column
       goodsId:   locker.goodsId,
       createdAt: new Date().toISOString(),
     };
@@ -332,13 +349,17 @@ async function main() {
     console.log('\n═══════════════════════════════════');
     console.log(`✅ PICKUP CODE : ${pickCode}`);
     console.log(`📋 ORDER NO   : ${orderNo || 'N/A'}`);
-    console.log(`📦 LOCKER     : ${locker.column}-${locker.row} (roadId=${locker.roadId})`);
+    console.log(`📦 LOCKER     : ${locker.lockerLabel} (roadId=${locker.roadId})`);  // ✅ FIX
     console.log('═══════════════════════════════════\n');
 
     console.log('OUTPUT_JSON:' + JSON.stringify({
-      success: true, pickCode, orderNo,
-      locker:  `${locker.column}-${locker.row}`,
-      funId:   CONFIG.funId, goodsId: locker.goodsId, roadId: locker.roadId,
+      success: true,
+      pickCode,
+      orderNo,
+      locker:      locker.lockerLabel,   // ✅ FIX: was column-row, now row-column
+      funId:       CONFIG.funId,
+      goodsId:     locker.goodsId,
+      roadId:      locker.roadId,
       generatedAt: new Date().toISOString(),
     }));
 
