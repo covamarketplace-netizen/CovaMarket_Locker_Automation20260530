@@ -61,11 +61,12 @@ jobs:
       - name: Save result
         if: success() && steps.generate.outputs.pick_code != ''
         run: |
-          mkdir -p pickup_codes
-          echo '${{ steps.generate.outputs.result }}' > pickup_codes/latest.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git reset --hard origin/main
+          mkdir -p pickup_codes
+          echo '${{ steps.generate.outputs.result }}' > pickup_codes/latest.json
           git add pickup_codes/
           git diff --staged --quiet || git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} for order ${{ github.event.inputs.order_id }}"
-          git pull --rebase origin main
-          git push
+          git push origin main
