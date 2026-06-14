@@ -2,9 +2,15 @@
  * generate_pickup_code.js
  * Generates XYZ Vending pickup code using JWT token.
  *
- * The API list endpoint returns ALL statuses (ignores pickStatus param) and
- * sorts OLDEST-FIRST. With 116+ total records, new codes land on the LAST page.
- * Strategy: always fetch the last 2 pages to find newest records.
+ * KEY FINDINGS from debugging:
+ * - API list sorts OLDEST-FIRST. New codes appear on the LAST page.
+ * - pickStatus=0 filter is UNRELIABLE — returns incomplete results.
+ * - addPickInfo silently no-ops if the locker already has a pending code.
+ *
+ * Strategy:
+ * - Fetch ALL records from ALL pages (client-side paginate), filter status=0 ourselves.
+ * - Snapshot ALL pickCodes before addPickInfo.
+ * - After addPickInfo, poll ALL pages for any new pickCode not in snapshot.
  */
 
 const https = require('https');
@@ -85,84 +91,56 @@ async function getAllChannels() {
 }
 
 /**
- * Fetch pick list page and return { records, total }.
- * Does NOT pass pickStatus — server ignores it anyway.
- * PAGE SIZE = 50.
+ * Fetch EVERY record from EVERY page — no server-side status filter.
+ * Returns { allRecords, allCodes: Set<pickCode>, total }
  */
-async function fetchPickPage(page, size = 50) {
-  const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}`,
+async function fetchAllRecords(size = 50) {
+  // Page 1 to get total
+  const first    = await request(
+    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=${size}&funId=${CONFIG.funId}`,
     { method: 'GET', headers: authHeaders() }
   );
-  const body    = res.body;
-  const records = body?.data?.records || body?.rows || body?.data || [];
-  const total   = body?.data?.total   || body?.total || 0;
-  return {
-    records: Array.isArray(records) ? records : [],
-    total:   typeof total === 'number' ? total : 0,
-  };
-}
+  const firstRecs = first.body?.data?.records || first.body?.rows || first.body?.data || [];
+  const total     = first.body?.data?.total   || first.body?.total || 0;
+  const lastPage  = Math.max(1, Math.ceil(total / size));
 
-/**
- * Fetch the NEWEST records from the list.
- * Since the API sorts oldest-first, newest records are on the LAST page(s).
- * Fetches the last 3 pages to cover any new codes.
- * Returns all fetched records (may include non-pending ones — filter yourself).
- */
-async function fetchNewestRecords(size = 50) {
-  // First fetch page 1 just to get the total count
-  const first    = await fetchPickPage(1, size);
-  const total    = first.total;
-  const lastPage = Math.max(1, Math.ceil(total / size));
+  console.log(`  📊 Total records: ${total} across ${lastPage} pages`);
 
-  console.log(`  📊 Total records in system: ${total} | Last page: ${lastPage}`);
+  const allRecords = Array.isArray(firstRecs) ? [...firstRecs] : [];
 
-  // Fetch last 3 pages (newest records)
-  const pagesToFetch = [lastPage, lastPage - 1, lastPage - 2].filter(p => p >= 1);
-  const allRecords   = [...first.records]; // include page 1 in case total=0 or only 1 page
-
-  for (const page of pagesToFetch) {
-    if (page === 1) continue; // already have page 1
-    const { records } = await fetchPickPage(page, size);
-    allRecords.push(...records);
+  // Fetch remaining pages
+  for (let page = 2; page <= lastPage; page++) {
+    const res  = await request(
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}`,
+      { method: 'GET', headers: authHeaders() }
+    );
+    const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
+    if (Array.isArray(recs) && recs.length) allRecords.push(...recs);
   }
 
-  return { records: allRecords, total };
+  const allCodes = new Set(allRecords.map(r => r.pickCode).filter(Boolean));
+  console.log(`  📊 Fetched ${allRecords.length} records total | ${allCodes.size} unique pickCodes`);
+  return { allRecords, allCodes, total };
 }
 
 /**
- * Get pending codes for locker-busy detection.
- * Pending = pickStatus === 0.
- * Fetches page 1 with pickStatus=0 filter (may work for status filtering even if
- * ordering is oldest-first), PLUS the last pages without filter.
- * Returns { names: Set<goodsName>, allCodes: Set<pickCode>, totalOverall }
+ * Get full pending state by fetching ALL records and filtering client-side.
+ * Returns { names: Set<goodsName with pending>, allCodes: Set<all pickCodes>, total }
  */
 async function getPendingState() {
-  console.log('🔍 Fetching pending pick codes (status=0) for locker selection...');
+  console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
+  const { allRecords, allCodes, total } = await fetchAllRecords();
 
-  // Fetch with status filter — may return oldest pending, good enough for "is locker busy"
-  const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=100&funId=${CONFIG.funId}&pickStatus=0`,
-    { method: 'GET', headers: authHeaders() }
-  );
-  const body    = res.body;
-  const rawList = body?.data?.records || body?.rows || body?.data || [];
-  const list    = Array.isArray(rawList) ? rawList : [];
-  const pending = list.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
+  const pending = allRecords.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
+  const names   = new Set(pending.map(r => r.goodsName).filter(Boolean));
 
-  const names = new Set(pending.map(r => r.goodsName).filter(Boolean));
-  console.log(`🔒 Lockers with pending codes: [${[...names].join(', ')}] (${pending.length} pending found)`);
+  console.log(`🔒 Pending codes (status=0): ${pending.length} found`);
   pending.forEach(r =>
     console.log(`  code=${r.pickCode} | locker="${r.goodsName}" | status=${r.pickStatus} | created=${r.createTime}`)
   );
+  console.log(`🔒 Lockers with pending codes: [${[...names].join(', ')}]`);
 
-  // Also snapshot ALL codes from newest pages for before/after diff
-  console.log('📸 Snapshotting newest records for before-diff...');
-  const { records: newestRecords, total: totalOverall } = await fetchNewestRecords();
-  const allCodes = new Set(newestRecords.map(r => r.pickCode).filter(Boolean));
-  console.log(`  📸 Snapshot: ${allCodes.size} codes from newest pages | ${totalOverall} total records overall`);
-
-  return { names, allCodes, totalOverall };
+  return { names, allCodes, total };
 }
 
 async function addPickInfo(locker) {
@@ -184,27 +162,25 @@ async function addPickInfo(locker) {
 }
 
 /**
- * Poll the NEWEST pages for any code that wasn't in beforeAllCodes.
- * Does not filter by goodsName or pickStatus.
+ * Poll ALL pages for any pickCode not in beforeAllCodes.
+ * No goodsName or status filter — catches the code regardless of how API stores it.
  */
 async function waitForNewPickCode(beforeAllCodes, beforeTotal, { maxAttempts = 8, delayMs = 3000 } = {}) {
-  console.log(`🔍 Polling newest pages for new code (before: ${beforeAllCodes.size} codes, ${beforeTotal} total records)...`);
+  console.log(`🔍 Polling ALL pages for new code (before: ${beforeAllCodes.size} codes, ${beforeTotal} total)...`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { records, total } = await fetchNewestRecords();
+    const { allRecords, total } = await fetchAllRecords();
 
-    console.log(`  Attempt ${attempt}/${maxAttempts} — total records now: ${total} (was ${beforeTotal})`);
+    console.log(`  Attempt ${attempt}/${maxAttempts} — total now: ${total} (was ${beforeTotal})`);
 
-    // Log newest 5 records on first attempt
     if (attempt === 1) {
-      records.slice(0, 5).forEach(r =>
-        console.log(`  📋 code=${r.pickCode} locker="${r.goodsName}" status=${r.pickStatus ?? r.status} createTime=${r.createTime}`)
+      // Log the 5 newest (last in array since oldest-first sort)
+      allRecords.slice(-5).forEach(r =>
+        console.log(`  📋 newest: code=${r.pickCode} locker="${r.goodsName}" status=${r.pickStatus ?? r.status} createTime=${r.createTime}`)
       );
     }
 
-    // Any code not in the before-snapshot is our new one
-    const newRecord = records.find(r => r.pickCode && !beforeAllCodes.has(r.pickCode)) ?? null;
-
+    const newRecord = allRecords.find(r => r.pickCode && !beforeAllCodes.has(r.pickCode)) ?? null;
     if (newRecord) {
       console.log(`✅ Found new code ${newRecord.pickCode} under "${newRecord.goodsName}" status=${newRecord.pickStatus ?? newRecord.status} on attempt ${attempt}`);
       return newRecord;
@@ -252,15 +228,15 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    const channels                                       = await getAllChannels();
-    const { names: pendingNames, allCodes: beforeAllCodes, totalOverall: beforeTotal } = await getPendingState();
+    const channels = await getAllChannels();
+    const { names: pendingNames, allCodes: beforeAllCodes, total: beforeTotal } = await getPendingState();
 
     const locker = await findFreeLocker(channels, pendingNames);
 
     // ── Create the pick code ─────────────────────────────────────────────────
     const result = await addPickInfo(locker);
 
-    // ── Try to get pickCode directly from response ───────────────────────────
+    // ── Try direct from response ─────────────────────────────────────────────
     let pickCode = result?.data?.pickCode
       || (Array.isArray(result?.data) && result.data[0]?.pickCode)
       || result?.pickCode
@@ -272,7 +248,7 @@ async function main() {
     if (pickCode) {
       console.log(`✅ pickCode found directly in addPickInfo response: ${pickCode}`);
     } else {
-      console.log('⚠️  pickCode not in response — polling newest pages...');
+      console.log('⚠️  pickCode not in response — polling all pages...');
       const match = await waitForNewPickCode(beforeAllCodes, beforeTotal);
       if (match?.pickCode) {
         pickCode = match.pickCode;
