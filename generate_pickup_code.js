@@ -151,8 +151,11 @@ async function getNewPickCode(lockerName, scriptStart, { maxAttempts = 6, delayM
     const list    = Array.isArray(records) ? records : [];
 
     // Our code: created at or after scriptStart, status=0, goodsName matches locker
-    const match = list
-      .filter(r => (r.pickStatus ?? r.status ?? -1) === 0)
+    const pending0 = list.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
+    if (attempt === 1) {
+      pending0.forEach(r => console.log(`  📋 pending: code=${r.pickCode} locker="${r.goodsName}" createTime=${r.createTime} (need >=${scriptStart})`));
+    }
+    const match = pending0
       .filter(r => (r.createTime ?? 0) >= scriptStart)
       .filter(r => !lockerName || r.goodsName === lockerName)
       .sort((a, b) => (b.createTime ?? 0) - (a.createTime ?? 0))[0] ?? null;
@@ -212,7 +215,7 @@ async function main() {
     const pendingLockerNames = await getPendingLockerNames(); // live API is source of truth
 
     const locker      = await findFreeLocker(channels, pendingLockerNames);
-    const scriptStart = Date.now();
+    const scriptStart = Date.now() - 10_000; // 10s buffer: server clock may be slightly ahead of runner
     const result      = await addPickInfo(locker);
 
     // Try to extract pick code directly from addPickInfo response
