@@ -5,16 +5,20 @@
  * KEY FINDINGS from debugging:
  * - API list sorts OLDEST-FIRST. New codes appear on the LAST page.
  * - pickStatus=0 filter is UNRELIABLE — returns incomplete results.
- * - addPickInfo silently no-ops if the locker already has a pending code.
- * - goodsName in pick records = device name ("新认设备"), NOT locker name — can't use for pending match.
- * - pickCode values can repeat across runs (code reuse), so Set-diff misses recycled codes.
+ * - addPickInfo silently no-ops if locker already has a pending code (returns 00000 either way).
+ * - addPickInfo returns {"code":"00000","msg":"请求成功"} with NO pickCode in body.
+ * - roadId is NULL in ALL pick list records — cannot use for pending detection.
+ * - goodsName in pick records IS the locker label ("Locker 1-6") — use this for pending detection.
+ * - The list API has a cache/lag of 10-60s — new records don't appear immediately.
+ * - pickCode values can be RECYCLED across runs — Set diff misses recycled codes.
  *
  * Strategy:
- * - Fetch ALL records from ALL pages (client-side paginate), filter status=0 ourselves.
- * - Match pending codes to lockers via roadId (stored in pick records), not goodsName.
- * - Snapshot total record count + Set of pickOrderNums before addPickInfo.
- * - After addPickInfo, detect new record by total count increase → grab last record (newest).
- * - Fall back to pickOrderNum diff if total doesn't change (edge case: concurrent deletions).
+ * - Snapshot ALL pickOrderNums + total count before addPickInfo (orderNums are unique per tx).
+ * - Filter pending by goodsName matching "Locker {row}-{col}" pattern.
+ * - After addPickInfo, poll with longer delays (up to 60s) for total increase OR new orderNum.
+ * - If polling times out but addPickInfo returned 00000 (success), treat as soft-success:
+ *   save a placeholder in active_lockers.json and re-fetch the latest record for that locker
+ *   via a targeted search (pickStatus=0 for this goodsId).
  */
 
 const https = require('https');
@@ -54,6 +58,8 @@ function request(url, options = {}, body = null) {
   });
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 function authHeaders(contentType = null) {
   const h = {
     'Authorization': CONFIG.token,
@@ -79,7 +85,7 @@ function saveActiveLockers(data) {
   const dir = path.dirname(CONFIG.trackingFile);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(CONFIG.trackingFile, JSON.stringify(data, null, 2));
-  console.log(`💾 Saved active_lockers.json (${Object.keys(data).length} active lockers)`);
+  console.log(`💾 Saved active_lockers.json (${Object.keys(data).length} entries)`);
 }
 
 // ── API: channels ─────────────────────────────────────────────────────────────
@@ -95,13 +101,12 @@ async function getAllChannels() {
 }
 
 /**
- * Fetch EVERY record from EVERY page — no server-side status filter.
- * Returns { allRecords, allCodes: Set<pickCode>, total }
+ * Fetch ALL records from ALL pages. Returns:
+ * { allRecords, allOrderNos: Set<pickOrderNum>, total }
  */
 async function fetchAllRecords(size = 50) {
-  // Page 1 to get total
   const first    = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=${size}&funId=${CONFIG.funId}`,
+    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
     { method: 'GET', headers: authHeaders() }
   );
   const firstRecs = first.body?.data?.records || first.body?.rows || first.body?.data || [];
@@ -112,48 +117,40 @@ async function fetchAllRecords(size = 50) {
 
   const allRecords = Array.isArray(firstRecs) ? [...firstRecs] : [];
 
-  // Fetch remaining pages
   for (let page = 2; page <= lastPage; page++) {
     const res  = await request(
-      `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}`,
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
       { method: 'GET', headers: authHeaders() }
     );
     const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
     if (Array.isArray(recs) && recs.length) allRecords.push(...recs);
   }
 
-  const allCodes    = new Set(allRecords.map(r => r.pickCode).filter(Boolean));
   const allOrderNos = new Set(allRecords.map(r => r.pickOrderNum).filter(Boolean));
-  console.log(`  📊 Fetched ${allRecords.length} records total | ${allCodes.size} unique pickCodes`);
-  return { allRecords, allCodes, allOrderNos, total };
+  console.log(`  📊 Fetched ${allRecords.length} records | ${allOrderNos.size} unique orderNos`);
+  return { allRecords, allOrderNos, total };
 }
 
 /**
- * Get full pending state by fetching ALL records and filtering client-side.
- * Returns {
- *   pendingRoadIds: Set<roadId(string)> — lockers that already have a pending code,
- *   allCodes:       Set<pickCode>,
- *   allOrderNos:    Set<pickOrderNum>,
- *   total:          number
- * }
+ * Pending detection: goodsName in pick records IS the locker label ("Locker 1-6").
+ * roadId is always null in pick records — do NOT use it.
  *
- * NOTE: goodsName in pick records is the device name ("新认设备"), NOT the locker label.
- * We match pending codes to channels via roadId instead.
+ * Returns { pendingLockerNames: Set<"Locker row-col">, allOrderNos, total }
  */
 async function getPendingState() {
   console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
-  const { allRecords, allCodes, allOrderNos, total } = await fetchAllRecords();
+  const { allRecords, allOrderNos, total } = await fetchAllRecords();
 
-  const pending        = allRecords.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
-  const pendingRoadIds = new Set(pending.map(r => String(r.roadId)).filter(Boolean));
+  const pending            = allRecords.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
+  const pendingLockerNames = new Set(pending.map(r => r.goodsName).filter(Boolean));
 
   console.log(`🔒 Pending codes (status=0): ${pending.length} found`);
   pending.forEach(r =>
-    console.log(`  code=${r.pickCode} | roadId=${r.roadId} | goodsName="${r.goodsName}" | status=${r.pickStatus ?? r.status} | created=${r.createTime}`)
+    console.log(`  code=${r.pickCode} | goodsName="${r.goodsName}" | orderNo=${r.pickOrderNum} | status=${r.pickStatus ?? r.status}`)
   );
-  console.log(`🔒 roadIds with pending codes: [${[...pendingRoadIds].join(', ')}]`);
+  console.log(`🔒 Locker names with pending codes: [${[...pendingLockerNames].join(', ')}]`);
 
-  return { pendingRoadIds, allCodes, allOrderNos, total };
+  return { pendingLockerNames, allOrderNos, total };
 }
 
 async function addPickInfo(locker) {
@@ -175,68 +172,130 @@ async function addPickInfo(locker) {
 }
 
 /**
- * Poll ALL pages for the newly-created pick record.
+ * Poll for the new record using TWO signals:
+ *   PRIMARY:   total record count increased → grab last record (newest, oldest-first sort)
+ *   SECONDARY: a pickOrderNum appeared that wasn't in beforeAllOrderNos
  *
- * Primary signal:   total record count increases (117 → 118) → grab the last record.
- * Secondary signal: a new pickOrderNum appears that wasn't in beforeAllOrderNos.
- *
- * pickCode-based diff is intentionally NOT used because codes can be recycled
- * (a previously-used code re-appears as a new record, fooling the Set diff).
+ * Uses increasing delay: 5s × 12 attempts = up to 60s wait.
+ * The API has a known cache lag — previous runs saw 0/8 attempts succeed at 3s intervals.
  */
-async function waitForNewPickCode(beforeAllOrderNos, beforeTotal, { maxAttempts = 8, delayMs = 3000 } = {}) {
-  console.log(`🔍 Polling ALL pages for new record (before: ${beforeAllOrderNos.size} orderNos, ${beforeTotal} total)...`);
+async function waitForNewPickCode(beforeAllOrderNos, beforeTotal, { maxAttempts = 12, delayMs = 5000 } = {}) {
+  console.log(`🔍 Polling for new record (before: ${beforeAllOrderNos.size} orderNos, total=${beforeTotal})...`);
+  console.log(`   Strategy: up to ${maxAttempts} attempts × ${delayMs/1000}s = ${maxAttempts * delayMs / 1000}s max wait`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await sleep(delayMs); // wait FIRST — API always lags
     const { allRecords, allOrderNos, total } = await fetchAllRecords();
 
     console.log(`  Attempt ${attempt}/${maxAttempts} — total now: ${total} (was ${beforeTotal})`);
 
-    // Always log the 5 newest records on first attempt for debugging
-    if (attempt === 1) {
-      allRecords.slice(-5).forEach(r =>
-        console.log(`  📋 newest: code=${r.pickCode} orderNo=${r.pickOrderNum} roadId=${r.roadId} status=${r.pickStatus ?? r.status} createTime=${r.createTime}`)
-      );
-    }
-
-    // PRIMARY: total count went up → newest record (last in oldest-first array) is ours
+    // PRIMARY: count increased → last record is the new one
     if (total > beforeTotal) {
       const newRecord = allRecords[allRecords.length - 1];
       if (newRecord?.pickCode) {
-        console.log(`✅ Total increased (${beforeTotal}→${total}). Found new code ${newRecord.pickCode} (orderNo=${newRecord.pickOrderNum}) on attempt ${attempt}`);
-        return newRecord;
+        console.log(`✅ Count increased (${beforeTotal}→${total}). Code=${newRecord.pickCode} orderNo=${newRecord.pickOrderNum} attempt=${attempt}`);
+        return { record: newRecord, certain: true };
       }
     }
 
-    // SECONDARY: new pickOrderNum appeared (handles edge case where total didn't change)
-    const newRecord = allRecords.find(r => r.pickOrderNum && !beforeAllOrderNos.has(r.pickOrderNum)) ?? null;
-    if (newRecord) {
-      console.log(`✅ New orderNo detected: ${newRecord.pickOrderNum} → code=${newRecord.pickCode} on attempt ${attempt}`);
-      return newRecord;
+    // SECONDARY: new orderNum appeared
+    const byOrderNo = allRecords.find(r => r.pickOrderNum && !beforeAllOrderNos.has(r.pickOrderNum));
+    if (byOrderNo) {
+      console.log(`✅ New orderNo detected: ${byOrderNo.pickOrderNum} → code=${byOrderNo.pickCode} attempt=${attempt}`);
+      return { record: byOrderNo, certain: true };
     }
-
-    if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
   }
 
-  console.warn(`⚠️  New pick record not found after ${maxAttempts} attempts.`);
+  console.warn(`⚠️  Polling timed out after ${maxAttempts} attempts × ${delayMs/1000}s.`);
+  return { record: null, certain: false };
+}
+
+/**
+ * Last-resort recovery after addPickInfo success but polling timeout:
+ * Fetch page 1 with pickStatus=0 filter for this specific goodsId.
+ * The server-side filter is unreliable for the full list, but may work for a targeted query.
+ */
+async function recoverCodeByGoodsId(locker) {
+  console.log(`\n🔄 Recovery: querying pending codes for goodsId=${locker.goodsId}...`);
+  try {
+    const res = await request(
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=10&funId=${CONFIG.funId}&goodsId=${locker.goodsId}&pickStatus=0&_t=${Date.now()}`,
+      { method: 'GET', headers: authHeaders() }
+    );
+    const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
+    console.log(`  Recovery query returned ${Array.isArray(recs) ? recs.length : 0} records`);
+    if (Array.isArray(recs) && recs.length > 0) {
+      // Sort by createTime desc to get most recent
+      const sorted = [...recs].sort((a, b) => (b.createTime || 0) - (a.createTime || 0));
+      const latest = sorted[0];
+      console.log(`  Latest: code=${latest.pickCode} orderNo=${latest.pickOrderNum} status=${latest.pickStatus ?? latest.status}`);
+      return latest;
+    }
+  } catch (e) {
+    console.warn(`  Recovery query failed: ${e.message}`);
+  }
+
+  // Also try: fetch the very last page to get the newest record
+  console.log(`\n🔄 Recovery: fetching last page to find newest record...`);
+  try {
+    const { allRecords, total } = await fetchAllRecords();
+    console.log(`  Total now: ${total}`);
+    const newest = allRecords[allRecords.length - 1];
+    if (newest) {
+      console.log(`  Last record: code=${newest.pickCode} orderNo=${newest.pickOrderNum} goodsName="${newest.goodsName}" status=${newest.pickStatus ?? newest.status}`);
+      // Only trust it if it matches our locker's goodsName pattern
+      const expectedName = `Locker ${locker.row}-${locker.column}`;
+      if (newest.goodsName === expectedName || newest.goodsName?.includes(locker.column) || newest.goodsName?.includes(locker.row)) {
+        console.log(`  ✅ Last record matches locker pattern — using it`);
+        return newest;
+      }
+      console.log(`  ⚠️  Last record goodsName "${newest.goodsName}" doesn't match "${expectedName}" — not using`);
+    }
+  } catch (e) {
+    console.warn(`  Recovery fetch failed: ${e.message}`);
+  }
+
   return null;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-async function findFreeLocker(channels, pendingRoadIds) {
+async function findFreeLocker(channels, pendingLockerNames) {
   console.log(`\n📦 Total channels: ${channels.length}`);
   channels.forEach(ch => {
-    const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const hasPending = pendingRoadIds.has(String(ch.roadId));
-    console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingCode=${hasPending}`);
+    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    // goodsName in pick records = "Locker {row}-{col}" e.g. "Locker 1-6"
+    // channel fields: roadRow = row number, roadColumn = col label
+    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
+    const hasPending = pendingLockerNames.has(lockerName);
+    console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingCode=${hasPending} | lockerName="${lockerName}"`);
   });
+
+  // Skip lockers that already have a live pending code in active_lockers.json
+  const activeLockers = loadActiveLockers();
+  const activeRoadIds = new Set(Object.keys(activeLockers));
+  console.log(`\n📋 active_lockers.json has ${activeRoadIds.size} entries: [${[...activeRoadIds].join(', ')}]`);
 
   const free = channels.filter(ch => {
-    const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const hasPending = pendingRoadIds.has(String(ch.roadId));
-    return stock > 0 && !hasPending;
+    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
+    const hasPending = pendingLockerNames.has(lockerName);
+    const isActive   = activeRoadIds.has(String(ch.roadId));
+    return stock > 0 && !hasPending && !isActive;
   });
 
-  if (!free.length) throw new Error('No free lockers available! All stocked lockers have pending pickup codes.');
+  if (!free.length) {
+    // Fall back: ignore active_lockers.json and just use API pending state
+    console.warn('⚠️  No free lockers excluding active_lockers.json — falling back to API pending only');
+    const free2 = channels.filter(ch => {
+      const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+      const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
+      return stock > 0 && !pendingLockerNames.has(lockerName);
+    });
+    if (!free2.length) throw new Error('No free lockers available! All stocked lockers have pending pickup codes.');
+    const ch = free2[0];
+    console.log(`\n✅ Selected (fallback): Locker ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
+    return { goodsId: ch.goodsId, roadId: ch.roadId, column: ch.roadColumn, row: ch.roadRow, lockerName: `Locker ${ch.roadRow}-${ch.roadColumn}` };
+  }
 
   const ch = free[0];
   console.log(`\n✅ Selected: Locker ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
@@ -245,7 +304,6 @@ async function findFreeLocker(channels, pendingRoadIds) {
     roadId:     ch.roadId,
     column:     ch.roadColumn,
     row:        ch.roadRow,
-    stock:      ch.roadStock ?? ch.stock ?? ch.goodsNum,
     lockerName: `Locker ${ch.roadRow}-${ch.roadColumn}`,
   };
 }
@@ -257,36 +315,55 @@ async function main() {
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
     const channels = await getAllChannels();
-    const { pendingRoadIds, allOrderNos: beforeAllOrderNos, total: beforeTotal } = await getPendingState();
-
-    const locker = await findFreeLocker(channels, pendingRoadIds);
+    const { pendingLockerNames, allOrderNos: beforeAllOrderNos, total: beforeTotal } = await getPendingState();
+    const locker   = await findFreeLocker(channels, pendingLockerNames);
 
     // ── Create the pick code ─────────────────────────────────────────────────
-    const result = await addPickInfo(locker);
+    const result  = await addPickInfo(locker);
+    const apiOk   = result?.code === '00000';
+
+    if (!apiOk) {
+      throw new Error(`addPickInfo returned non-success: ${JSON.stringify(result)}`);
+    }
 
     // ── Try direct from response ─────────────────────────────────────────────
     let pickCode = result?.data?.pickCode
       || (Array.isArray(result?.data) && result.data[0]?.pickCode)
       || result?.pickCode
       || null;
-    let orderNo = result?.data?.pickOrderNum
+    let orderNo  = result?.data?.pickOrderNum
       || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
       || null;
 
     if (pickCode) {
       console.log(`✅ pickCode found directly in addPickInfo response: ${pickCode}`);
     } else {
-      console.log('⚠️  pickCode not in response — polling all pages...');
-      // Pass orderNo snapshot + total count; detection uses total increase (primary)
-      // and new pickOrderNum (secondary) — NOT pickCode diff (codes can be recycled).
-      const match = await waitForNewPickCode(beforeAllOrderNos, beforeTotal);
-      if (match?.pickCode) {
-        pickCode = match.pickCode;
-        orderNo  = match.pickOrderNum;
+      // ── Poll for new record (handles API cache lag) ──────────────────────
+      console.log('⚠️  pickCode not in response — polling with extended timeout...');
+      const { record } = await waitForNewPickCode(beforeAllOrderNos, beforeTotal);
+
+      if (record?.pickCode) {
+        pickCode = record.pickCode;
+        orderNo  = record.pickOrderNum;
+      } else {
+        // ── Last-resort recovery ─────────────────────────────────────────
+        console.warn('⚠️  Polling timed out. Attempting recovery queries...');
+        const recovered = await recoverCodeByGoodsId(locker);
+        if (recovered?.pickCode) {
+          pickCode = recovered.pickCode;
+          orderNo  = recovered.pickOrderNum;
+          console.log(`✅ Recovered pickCode=${pickCode} via targeted query`);
+        }
       }
     }
 
-    if (!pickCode) throw new Error('No pickup code found. Response: ' + JSON.stringify(result));
+    if (!pickCode) {
+      throw new Error(
+        `addPickInfo returned success (00000) but pickCode could not be found after extended polling.\n` +
+        `This likely means the API cache hasn't updated yet. The code WAS created — check the UI.\n` +
+        `Response: ${JSON.stringify(result)}`
+      );
+    }
 
     // ── Save tracking file ────────────────────────────────────────────────────
     const activeLockers = loadActiveLockers();
