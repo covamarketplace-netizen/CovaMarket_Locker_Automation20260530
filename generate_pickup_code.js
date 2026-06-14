@@ -195,21 +195,21 @@ async function findFreeLocker(channels, pendingLockerNames) {
 
   channels.forEach(ch => {
     const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
     const inUse      = pendingLockerNames.has(lockerName);
     console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | stock=${stock} | pendingCode=${inUse}`);
   });
 
   const free = channels.filter(ch => {
     const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
     return stock > 0 && !pendingLockerNames.has(lockerName);
   });
 
   if (!free.length) throw new Error('No free lockers available! All stocked lockers have pending pickup codes.');
 
   const ch         = free[0];
-  const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+  const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
   console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId}`);
   return {
     goodsId:    ch.goodsId,
