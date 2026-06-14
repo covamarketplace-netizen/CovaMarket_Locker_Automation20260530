@@ -165,22 +165,36 @@ async function getPickCodeForRoad(roadId, { maxAttempts = 6, delayMs = 3000 } = 
       `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=20&funId=${CONFIG.funId}`,
       { method: 'GET', headers: authHeaders() }
     );
+    // Dump the FULL raw response on every attempt so we can debug the structure
+    console.log(`  [attempt ${attempt}] HTTP ${res.status} | raw body:`, JSON.stringify(res.body).slice(0, 800));
+
     const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
     const list    = Array.isArray(records) ? records : [];
+    console.log(`  [attempt ${attempt}] parsed list length: ${list.length}`);
 
-    // Find a pending (status=0) code whose roadId matches the locker we just assigned
-    const match = list.find(r => {
-      const rRoadId = r.roadId ?? r.road_id ?? null;
+    // Strategy 1: match by roadId + status=0 (preferred — unambiguous)
+    const byRoadId = list.find(r => {
+      const rRoadId = r.roadId ?? r.road_id ?? r.roadInfoId ?? null;
       const status  = r.pickStatus ?? r.status ?? -1;
       return String(rRoadId) === String(roadId) && status === 0;
     });
-
-    if (match) {
-      console.log(`✅ Found code ${match.pickCode} for roadId=${roadId} on attempt ${attempt}`);
-      return match;
+    if (byRoadId) {
+      console.log(`✅ Found code ${byRoadId.pickCode} by roadId match on attempt ${attempt}`);
+      return byRoadId;
     }
 
-    console.log(`  Attempt ${attempt}/${maxAttempts} — code not yet visible, waiting ${delayMs}ms...`);
+    // Strategy 2: if roadId is not in the response, fall back to newest status=0 record
+    // Safe because we only reach this after addPickInfo succeeded
+    const byStatus = list.find(r => {
+      const status = r.pickStatus ?? r.status ?? -1;
+      return status === 0;
+    });
+    if (byStatus) {
+      console.log(`✅ Found code ${byStatus.pickCode} by status=0 fallback on attempt ${attempt} — keys: ${Object.keys(byStatus).join(', ')}`);
+      return byStatus;
+    }
+
+    console.log(`  Attempt ${attempt}/${maxAttempts} — no pending code visible yet, waiting ${delayMs}ms...`);
     if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
   }
 
@@ -234,6 +248,9 @@ async function main() {
 
     const locker = await findFreeLocker(channels, activeLockers);
     const result = await addPickInfo(locker);
+
+    // Dump addPickInfo full response to find hidden fields
+    console.log('🔬 addPickInfo full response:', JSON.stringify(result));
 
     // Extract pick code from addPickInfo response first
     let pickCode = result?.data?.pickCode
