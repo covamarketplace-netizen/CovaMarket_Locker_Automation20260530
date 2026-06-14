@@ -157,42 +157,34 @@ async function addPickInfo(locker) {
  * Retries up to maxAttempts times with a delay — handles API propagation lag.
  * No clock/timezone comparison: we identify "our" code by roadId + status=0.
  */
-async function getPickCodeForRoad(roadId, { maxAttempts = 6, delayMs = 3000 } = {}) {
-  console.log(`🔍 Fetching pending pick code for roadId=${roadId} (up to ${maxAttempts} attempts)...`);
+async function getPickCodeForRoad(roadId, scriptStart, { maxAttempts = 6, delayMs = 3000 } = {}) {
+  console.log(`🔍 Fetching pending pick code for roadId=${roadId} (scriptStart=${scriptStart}, up to ${maxAttempts} attempts)...`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await request(
       `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=20&funId=${CONFIG.funId}`,
       { method: 'GET', headers: authHeaders() }
     );
-    // Dump the FULL raw response on every attempt so we can debug the structure
-    console.log(`  [attempt ${attempt}] HTTP ${res.status} | raw body:`, JSON.stringify(res.body).slice(0, 800));
-
     const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
     const list    = Array.isArray(records) ? records : [];
-    console.log(`  [attempt ${attempt}] parsed list length: ${list.length}`);
 
-    // Strategy 1: match by roadId + status=0 (preferred — unambiguous)
-    const byRoadId = list.find(r => {
-      const rRoadId = r.roadId ?? r.road_id ?? r.roadInfoId ?? null;
-      const status  = r.pickStatus ?? r.status ?? -1;
-      return String(rRoadId) === String(roadId) && status === 0;
-    });
-    if (byRoadId) {
-      console.log(`✅ Found code ${byRoadId.pickCode} by roadId match on attempt ${attempt}`);
-      return byRoadId;
+    // roadId is always null in list responses — match by newest createTime + status=0 + goodsName
+    // createTime is a Unix ms timestamp. Filter pending codes for this locker by goodsName,
+    // then pick the one created AFTER we started (scriptStart), or the most recent overall.
+    const pending = list
+      .filter(r => (r.pickStatus ?? r.status ?? -1) === 0)
+      .sort((a, b) => (b.createTime ?? 0) - (a.createTime ?? 0)); // newest first
+
+    // Prefer a code created after this script started running
+    const fresh = pending.find(r => (r.createTime ?? 0) >= scriptStart);
+    const match = fresh ?? null;
+
+    if (match) {
+      console.log(`✅ Found code ${match.pickCode} (createTime=${match.createTime}, scriptStart=${scriptStart}) on attempt ${attempt}`);
+      return match;
     }
 
-    // Strategy 2: if roadId is not in the response, fall back to newest status=0 record
-    // Safe because we only reach this after addPickInfo succeeded
-    const byStatus = list.find(r => {
-      const status = r.pickStatus ?? r.status ?? -1;
-      return status === 0;
-    });
-    if (byStatus) {
-      console.log(`✅ Found code ${byStatus.pickCode} by status=0 fallback on attempt ${attempt} — keys: ${Object.keys(byStatus).join(', ')}`);
-      return byStatus;
-    }
+    console.log(`  Attempt ${attempt}/${maxAttempts} — no fresh pending code yet (${pending.length} pending total), waiting ${delayMs}ms...`);
 
     console.log(`  Attempt ${attempt}/${maxAttempts} — no pending code visible yet, waiting ${delayMs}ms...`);
     if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
@@ -247,10 +239,8 @@ async function main() {
     saveActiveLockers(activeLockers); // save reconciled state before generating
 
     const locker = await findFreeLocker(channels, activeLockers);
+    const scriptStart = Date.now(); // ms timestamp — used to identify the code we just created
     const result = await addPickInfo(locker);
-
-    // Dump addPickInfo full response to find hidden fields
-    console.log('🔬 addPickInfo full response:', JSON.stringify(result));
 
     // Extract pick code from addPickInfo response first
     let pickCode = result?.data?.pickCode
@@ -263,8 +253,8 @@ async function main() {
 
     // Only fall back to list if response didn't include the code
     if (!pickCode) {
-      console.log('⚠️  pickCode not in response — searching list by roadId...');
-      const match = await getPickCodeForRoad(locker.roadId);
+      console.log('⚠️  pickCode not in response — searching list by createTime...');
+      const match = await getPickCodeForRoad(locker.roadId, scriptStart);
       if (match?.pickCode) {
         pickCode = match.pickCode;
         orderNo  = match.pickOrderNum;
