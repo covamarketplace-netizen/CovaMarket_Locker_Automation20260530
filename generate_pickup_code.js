@@ -136,32 +136,48 @@ async function addPickInfo(locker) {
 
 /**
  * Poll the list for a freshly created code.
- * Identifies "our" code by createTime >= scriptStart (Unix ms).
- * roadId is always null in list responses, so we cannot match by it.
+ * Fetches multiple pages (newest-last API) to find our code.
+ * Identifies "our" code by createTime >= scriptStart (Unix ms) + goodsName match.
  */
-async function getNewPickCode(lockerName, scriptStart, { maxAttempts = 6, delayMs = 3000 } = {}) {
-  console.log(`🔍 Waiting for new pick code (scriptStart=${scriptStart})...`);
+async function getNewPickCode(lockerName, scriptStart, { maxAttempts = 8, delayMs = 3000 } = {}) {
+  console.log(`🔍 Waiting for new pick code (scriptStart=${scriptStart}, locker="${lockerName}")...`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await request(
-      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=20&funId=${CONFIG.funId}`,
-      { method: 'GET', headers: authHeaders() }
-    );
-    const records = res.body?.data?.records || res.body?.rows || res.body?.data || [];
-    const list    = Array.isArray(records) ? records : [];
-
-    // Our code: created at or after scriptStart, status=0, goodsName matches locker
-    const pending0 = list.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
-    if (attempt === 1) {
-      pending0.forEach(r => console.log(`  📋 pending: code=${r.pickCode} locker="${r.goodsName}" createTime=${r.createTime} (need >=${scriptStart})`));
+    // Fetch a large page — try both page 1 and page 2 in case sorted oldest-first
+    const allRecords = [];
+    for (const page of [1, 2, 3]) {
+      const res = await request(
+        `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=50&funId=${CONFIG.funId}`,
+        { method: 'GET', headers: authHeaders() }
+      );
+      const records = res.body?.data?.records || res.body?.rows || res.body?.data || [];
+      if (Array.isArray(records) && records.length) allRecords.push(...records);
+      else break; // no more pages
     }
-    const match = pending0
+
+    // Log all records on first attempt to understand sort order
+    if (attempt === 1) {
+      console.log(`  📋 Total records fetched across pages: ${allRecords.length}`);
+      allRecords.slice(0, 5).forEach(r =>
+        console.log(`  📋 sample: code=${r.pickCode} locker="${r.goodsName}" createTime=${r.createTime} status=${r.pickStatus}`)
+      );
+      // Also log the last few (in case sorted oldest-first, newest are at end)
+      if (allRecords.length > 5) {
+        console.log('  ... (skipping middle records) ...');
+        allRecords.slice(-3).forEach(r =>
+          console.log(`  📋 sample: code=${r.pickCode} locker="${r.goodsName}" createTime=${r.createTime} status=${r.pickStatus}`)
+        );
+      }
+    }
+
+    const match = allRecords
+      .filter(r => (r.pickStatus ?? r.status ?? -1) === 0)
       .filter(r => (r.createTime ?? 0) >= scriptStart)
       .filter(r => !lockerName || r.goodsName === lockerName)
       .sort((a, b) => (b.createTime ?? 0) - (a.createTime ?? 0))[0] ?? null;
 
     if (match) {
-      console.log(`✅ Found new code ${match.pickCode} for "${match.goodsName}" on attempt ${attempt}`);
+      console.log(`✅ Found new code ${match.pickCode} for "${match.goodsName}" (createTime=${match.createTime}) on attempt ${attempt}`);
       return match;
     }
 
