@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Show current active_lockers.json (debug)
+      - name: Show current active_lockers.json
         run: |
           echo "📋 Current active_lockers.json:"
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(file does not exist yet)"
@@ -57,7 +57,7 @@ jobs:
           echo "$JSON" > pickup_codes/latest.json
 
           echo "📋 active_lockers.json after script ran:"
-          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(missing — script did not write it)"
+          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING)"
 
       - name: Send pickup code to customer
         if: success() && steps.generate.outputs.pick_code != ''
@@ -74,9 +74,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          echo "📋 active_lockers.json about to be committed:"
-          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING — will not be committed)"
+          # Force-add in case pickup_codes/ is gitignored or not yet tracked
+          git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
 
-          git add pickup_codes/active_lockers.json pickup_codes/latest.json
-          git diff --staged --quiet || git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
+          echo "📋 Git status after add:"
+          git status
+
+          echo "📋 Git diff staged:"
+          git diff --staged --stat
+
+          git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
+            git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
+          
           git push origin main
