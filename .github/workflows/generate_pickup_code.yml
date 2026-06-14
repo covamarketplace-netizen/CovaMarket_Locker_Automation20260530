@@ -29,6 +29,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Show current active_lockers.json (debug)
+        run: |
+          echo "📋 Current active_lockers.json:"
+          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(file does not exist yet)"
+
       - name: Generate pickup code
         id: generate
         env:
@@ -40,13 +45,19 @@ jobs:
           echo "──────── Output ────────"
           echo "$OUTPUT"
           echo "────────────────────────"
+
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
-          echo "result=$JSON" >> $GITHUB_OUTPUT
           PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
-          LOCKER=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))" 2>/dev/null || echo "")
+          LOCKER=$(echo "$JSON"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))"    2>/dev/null || echo "")
+
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
-          echo "locker=$LOCKER" >> $GITHUB_OUTPUT
-          echo "✅ Pickup code: $PICK_CODE for locker: $LOCKER"
+          echo "locker=$LOCKER"       >> $GITHUB_OUTPUT
+
+          mkdir -p pickup_codes
+          echo "$JSON" > pickup_codes/latest.json
+
+          echo "📋 active_lockers.json after script ran:"
+          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(missing — script did not write it)"
 
       - name: Send pickup code to customer
         if: success() && steps.generate.outputs.pick_code != ''
@@ -56,44 +67,16 @@ jobs:
           LOCKER:    ${{ steps.generate.outputs.locker }}
         run: |
           echo "📦 Pickup code $PICK_CODE for order $ORDER_ID (locker $LOCKER)"
-          # Add WhatsApp/email notification here
 
-      - name: Commit active_lockers.json and result
+      - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git reset --hard origin/main
 
-          # Re-run script to get the updated active_lockers.json into this checkout
-          # (the file was written during the generate step above, but reset --hard wiped it)
-          # So we just write it directly from the saved output
-          mkdir -p pickup_codes
-          echo '${{ steps.generate.outputs.result }}' > pickup_codes/latest.json
+          echo "📋 active_lockers.json about to be committed:"
+          cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING — will not be committed)"
 
-          # Restore active_lockers.json by re-reading what the script produced
-          # The script already wrote it to disk before reset — we need to re-generate it.
-          # Simpler: store the active_lockers update as a separate output and apply it here.
-          node -e "
-            const fs = require('fs');
-            const trackingFile = 'pickup_codes/active_lockers.json';
-            let active = {};
-            try { active = JSON.parse(fs.readFileSync(trackingFile, 'utf8')); } catch {}
-            const result = JSON.parse('${{ steps.generate.outputs.result }}');
-            if (result.success && result.roadId) {
-              active[result.roadId] = {
-                pickCode:  result.pickCode,
-                orderNo:   result.orderNo || null,
-                locker:    result.locker,
-                goodsId:   result.goodsId,
-                createdAt: result.generatedAt,
-              };
-              fs.writeFileSync(trackingFile, JSON.stringify(active, null, 2));
-              console.log('Updated active_lockers.json:', JSON.stringify(active, null, 2));
-            }
-          "
-
-          git add pickup_codes/
+          git add pickup_codes/active_lockers.json pickup_codes/latest.json
           git diff --staged --quiet || git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
           git push origin main
