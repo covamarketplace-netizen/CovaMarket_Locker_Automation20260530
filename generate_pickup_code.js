@@ -2,9 +2,12 @@
  * generate_pickup_code.js
  * Generates XYZ Vending pickup code using JWT token.
  *
- * Tracks active lockers in pickup_codes/active_lockers.json.
- * Before picking a locker, reconciles tracked lockers against the live
- * pick code list — frees any locker whose code is no longer pending (status != 0).
+ * Source of truth for "which lockers are busy" = live API (status=0 pending codes).
+ * active_lockers.json is saved for reference only — NOT used for locking decisions.
+ *
+ * A locker is considered IN USE if any pending (status=0) pick code exists
+ * whose goodsName matches the locker name (e.g. "Locker 1-1").
+ * Only lockers with NO pending codes AND stock > 0 are eligible for assignment.
  */
 
 const https = require('https');
@@ -57,13 +60,12 @@ function authHeaders(contentType = null) {
   return h;
 }
 
-// ── Tracking file ─────────────────────────────────────────────────────────────
+// ── Tracking file (reference only — not used for locking decisions) ───────────
 function loadActiveLockers() {
   try {
     if (!fs.existsSync(CONFIG.trackingFile)) return {};
     return JSON.parse(fs.readFileSync(CONFIG.trackingFile, 'utf8'));
   } catch {
-    console.warn('⚠️  Could not read active_lockers.json — starting fresh.');
     return {};
   }
 }
@@ -88,50 +90,30 @@ async function getAllChannels() {
 }
 
 /**
- * Look up a specific pick code's status by searching the list for it.
- * Returns the pickStatus number, or null if not found.
+ * Fetch ALL pending (status=0) pick codes from the live API.
+ * Returns a Set of goodsName values that are awaiting pickup.
+ * e.g. Set { "Locker 1-1", "Locker 2-1" }
+ *
+ * Fetches up to 100 records to cover all possible pending codes.
  */
-async function getPickCodeStatus(pickCode) {
+async function getPendingLockerNames() {
+  console.log('🔍 Fetching all pending pick codes from live API...');
   const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=50&pickCode=${pickCode}`,
+    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=100&funId=${CONFIG.funId}&pickStatus=0`,
     { method: 'GET', headers: authHeaders() }
   );
-  const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
+  const records = res.body?.data?.records || res.body?.rows || res.body?.data || [];
   const list    = Array.isArray(records) ? records : [];
-  const match   = list.find(r => String(r.pickCode) === String(pickCode));
-  return match ? (match.pickStatus ?? match.status ?? null) : null;
-}
 
-/**
- * Reconcile active_lockers.json against the live API.
- * Removes any locker whose pick code is no longer status=0 (pending).
- *   status 0 = awaiting pickup  → keep locked
- *   status 1 = completed        → free locker
- *   status 2 = invalid/expired  → free locker
- *   status 3 = ???              → free locker (anything not 0)
- *   null     = not found        → free locker (code was voided/deleted)
- */
-async function reconcileActiveLockers(activeLockers) {
-  const roadIds = Object.keys(activeLockers);
-  if (!roadIds.length) return activeLockers;
+  // Filter to only truly pending (status=0) records (in case API ignores pickStatus param)
+  const pending = list.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
 
-  console.log(`\n🔄 Reconciling ${roadIds.length} tracked locker(s) against live API...`);
-  const updated = { ...activeLockers };
-
-  for (const roadId of roadIds) {
-    const entry     = activeLockers[roadId];
-    const status    = await getPickCodeStatus(entry.pickCode);
-    const statusStr = status === null ? 'NOT FOUND' : String(status);
-
-    if (status === 0) {
-      console.log(`  🔒 Locker ${entry.locker} (code ${entry.pickCode}) — still pending (status=0) → keeping locked`);
-    } else {
-      console.log(`  ✅ Locker ${entry.locker} (code ${entry.pickCode}) — status=${statusStr} → FREED`);
-      delete updated[roadId];
-    }
-  }
-
-  return updated;
+  const names = new Set(pending.map(r => r.goodsName).filter(Boolean));
+  console.log(`🔒 Lockers with pending codes: [${[...names].join(', ')}] (${pending.length} pending codes total)`);
+  pending.forEach(r => {
+    console.log(`  code=${r.pickCode} | locker="${r.goodsName}" | status=${r.pickStatus} | created=${r.createTime}`);
+  });
+  return names;
 }
 
 async function addPickInfo(locker) {
@@ -153,75 +135,70 @@ async function addPickInfo(locker) {
 }
 
 /**
- * Fetch the newest pending pick code for a specific roadId.
- * Retries up to maxAttempts times with a delay — handles API propagation lag.
- * No clock/timezone comparison: we identify "our" code by roadId + status=0.
+ * Poll the list for a freshly created code.
+ * Identifies "our" code by createTime >= scriptStart (Unix ms).
+ * roadId is always null in list responses, so we cannot match by it.
  */
-async function getPickCodeForRoad(roadId, scriptStart, { maxAttempts = 6, delayMs = 3000 } = {}) {
-  console.log(`🔍 Fetching pending pick code for roadId=${roadId} (scriptStart=${scriptStart}, up to ${maxAttempts} attempts)...`);
+async function getNewPickCode(lockerName, scriptStart, { maxAttempts = 6, delayMs = 3000 } = {}) {
+  console.log(`🔍 Waiting for new pick code (scriptStart=${scriptStart})...`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await request(
       `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=20&funId=${CONFIG.funId}`,
       { method: 'GET', headers: authHeaders() }
     );
-    const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
+    const records = res.body?.data?.records || res.body?.rows || res.body?.data || [];
     const list    = Array.isArray(records) ? records : [];
 
-    // roadId is always null in list responses — match by newest createTime + status=0 + goodsName
-    // createTime is a Unix ms timestamp. Filter pending codes for this locker by goodsName,
-    // then pick the one created AFTER we started (scriptStart), or the most recent overall.
-    const pending = list
+    // Our code: created at or after scriptStart, status=0, goodsName matches locker
+    const match = list
       .filter(r => (r.pickStatus ?? r.status ?? -1) === 0)
-      .sort((a, b) => (b.createTime ?? 0) - (a.createTime ?? 0)); // newest first
-
-    // Prefer a code created after this script started running
-    const fresh = pending.find(r => (r.createTime ?? 0) >= scriptStart);
-    const match = fresh ?? null;
+      .filter(r => (r.createTime ?? 0) >= scriptStart)
+      .filter(r => !lockerName || r.goodsName === lockerName)
+      .sort((a, b) => (b.createTime ?? 0) - (a.createTime ?? 0))[0] ?? null;
 
     if (match) {
-      console.log(`✅ Found code ${match.pickCode} (createTime=${match.createTime}, scriptStart=${scriptStart}) on attempt ${attempt}`);
+      console.log(`✅ Found new code ${match.pickCode} for "${match.goodsName}" on attempt ${attempt}`);
       return match;
     }
 
-    console.log(`  Attempt ${attempt}/${maxAttempts} — no fresh pending code yet (${pending.length} pending total), waiting ${delayMs}ms...`);
-
-    console.log(`  Attempt ${attempt}/${maxAttempts} — no pending code visible yet, waiting ${delayMs}ms...`);
+    console.log(`  Attempt ${attempt}/${maxAttempts} — new code not visible yet, waiting ${delayMs}ms...`);
     if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
   }
 
-  console.warn(`⚠️  No pending code found for roadId=${roadId} after ${maxAttempts} attempts.`);
+  console.warn(`⚠️  New pick code not found after ${maxAttempts} attempts.`);
   return null;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-async function findFreeLocker(channels, activeLockers) {
-  const activeRoadIds = new Set(Object.keys(activeLockers).map(Number));
-
+async function findFreeLocker(channels, pendingLockerNames) {
   console.log(`\n📦 Total channels: ${channels.length}`);
-  console.log(`🔒 Active (locked) lockers: [${[...activeRoadIds].join(', ')}]`);
 
   channels.forEach(ch => {
-    const stock  = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const active = activeRoadIds.has(ch.roadId);
-    console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | stock=${stock} | inUse=${active}`);
+    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+    const inUse      = pendingLockerNames.has(lockerName);
+    console.log(`  ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId} | stock=${stock} | pendingCode=${inUse}`);
   });
 
   const free = channels.filter(ch => {
-    const stock = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    return stock > 0 && !activeRoadIds.has(ch.roadId);
+    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+    return stock > 0 && !pendingLockerNames.has(lockerName);
   });
 
-  if (!free.length) throw new Error('No free lockers available! All stocked lockers are assigned.');
+  if (!free.length) throw new Error('No free lockers available! All stocked lockers have pending pickup codes.');
 
-  const ch = free[0];
-  console.log(`\n✅ Selected: ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId}`);
+  const ch         = free[0];
+  const lockerName = `Locker ${ch.roadColumn}-${ch.roadRow}`;
+  console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId}`);
   return {
-    goodsId: ch.goodsId,
-    roadId:  ch.roadId,
-    column:  ch.roadColumn,
-    row:     ch.roadRow,
-    stock:   ch.roadStock ?? ch.stock ?? ch.goodsNum,
+    goodsId:    ch.goodsId,
+    roadId:     ch.roadId,
+    column:     ch.roadColumn,
+    row:        ch.roadRow,
+    stock:      ch.roadStock ?? ch.stock ?? ch.goodsNum,
+    lockerName,
   };
 }
 
@@ -231,18 +208,14 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    const channels = await getAllChannels();
+    const channels          = await getAllChannels();
+    const pendingLockerNames = await getPendingLockerNames(); // live API is source of truth
 
-    // Reconcile tracked lockers — free any whose code is no longer pending
-    let activeLockers = loadActiveLockers();
-    activeLockers     = await reconcileActiveLockers(activeLockers);
-    saveActiveLockers(activeLockers); // save reconciled state before generating
+    const locker      = await findFreeLocker(channels, pendingLockerNames);
+    const scriptStart = Date.now();
+    const result      = await addPickInfo(locker);
 
-    const locker = await findFreeLocker(channels, activeLockers);
-    const scriptStart = Date.now(); // ms timestamp — used to identify the code we just created
-    const result = await addPickInfo(locker);
-
-    // Extract pick code from addPickInfo response first
+    // Try to extract pick code directly from addPickInfo response
     let pickCode = result?.data?.pickCode
       || (Array.isArray(result?.data) && result.data[0]?.pickCode)
       || result?.pickCode
@@ -251,10 +224,10 @@ async function main() {
       || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
       || null;
 
-    // Only fall back to list if response didn't include the code
+    // Fall back to polling the list
     if (!pickCode) {
-      console.log('⚠️  pickCode not in response — searching list by createTime...');
-      const match = await getPickCodeForRoad(locker.roadId, scriptStart);
+      console.log('⚠️  pickCode not in response — polling list...');
+      const match = await getNewPickCode(locker.lockerName, scriptStart);
       if (match?.pickCode) {
         pickCode = match.pickCode;
         orderNo  = match.pickOrderNum;
@@ -263,7 +236,8 @@ async function main() {
 
     if (!pickCode) throw new Error('No pickup code found. Response: ' + JSON.stringify(result));
 
-    // Save this locker as active
+    // Save for reference
+    const activeLockers = loadActiveLockers();
     activeLockers[locker.roadId] = {
       pickCode,
       orderNo:   orderNo || null,
