@@ -1,0 +1,22 @@
+name: Debug Locker IDs
+
+on:
+  workflow_dispatch:  # run manually from GitHub Actions tab
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run debug script
+        env:
+          XYZ_TOKEN:  ${{ secrets.XYZ_TOKEN }}
+          XYZ_FUN_ID: ${{ secrets.XYZ_FUN_ID }}
+        run: node debug_lockers.js
