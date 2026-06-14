@@ -2,12 +2,9 @@
  * generate_pickup_code.js
  * Generates XYZ Vending pickup code using JWT token.
  *
- * KEY INSIGHT: The /api/pickInfo/list endpoint returns roadId=null for all
- * records, so we cannot detect which lockers are occupied from the API.
- *
- * SOLUTION: We maintain our own tracking file at pickup_codes/active_lockers.json
- * in the repo. Each entry maps a locker's roadId → { pickCode, orderNo, createdAt }.
- * The GitHub Actions workflow writes this file after each successful generation.
+ * Tracks active lockers in pickup_codes/active_lockers.json.
+ * Before picking a locker, reconciles tracked lockers against the live
+ * pick code list — frees any locker whose code is no longer pending (status != 0).
  */
 
 const https = require('https');
@@ -60,17 +57,11 @@ function authHeaders(contentType = null) {
   return h;
 }
 
-// ── Tracking file helpers ─────────────────────────────────────────────────────
-
-/**
- * Load our local tracking of active (in-use) lockers.
- * Returns a map of roadId (string) → { pickCode, orderNo, locker, createdAt }
- */
+// ── Tracking file ─────────────────────────────────────────────────────────────
 function loadActiveLockers() {
   try {
     if (!fs.existsSync(CONFIG.trackingFile)) return {};
-    const raw = fs.readFileSync(CONFIG.trackingFile, 'utf8');
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync(CONFIG.trackingFile, 'utf8'));
   } catch {
     console.warn('⚠️  Could not read active_lockers.json — starting fresh.');
     return {};
@@ -85,7 +76,6 @@ function saveActiveLockers(data) {
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
-
 async function getAllChannels() {
   console.log('🔍 Getting all channels...');
   const res = await request(
@@ -95,6 +85,53 @@ async function getAllChannels() {
   if (res.status !== 200) throw new Error(`getRoadGoodsByFunId failed: ${res.status}`);
   const channels = res.body?.data || res.body?.rows || res.body || [];
   return Array.isArray(channels) ? channels : [];
+}
+
+/**
+ * Look up a specific pick code's status by searching the list for it.
+ * Returns the pickStatus number, or null if not found.
+ */
+async function getPickCodeStatus(pickCode) {
+  const res = await request(
+    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=50&pickCode=${pickCode}`,
+    { method: 'GET', headers: authHeaders() }
+  );
+  const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
+  const list    = Array.isArray(records) ? records : [];
+  const match   = list.find(r => String(r.pickCode) === String(pickCode));
+  return match ? (match.pickStatus ?? match.status ?? null) : null;
+}
+
+/**
+ * Reconcile active_lockers.json against the live API.
+ * Removes any locker whose pick code is no longer status=0 (pending).
+ *   status 0 = awaiting pickup  → keep locked
+ *   status 1 = completed        → free locker
+ *   status 2 = invalid/expired  → free locker
+ *   status 3 = ???              → free locker (anything not 0)
+ *   null     = not found        → free locker (code was voided/deleted)
+ */
+async function reconcileActiveLockers(activeLockers) {
+  const roadIds = Object.keys(activeLockers);
+  if (!roadIds.length) return activeLockers;
+
+  console.log(`\n🔄 Reconciling ${roadIds.length} tracked locker(s) against live API...`);
+  const updated = { ...activeLockers };
+
+  for (const roadId of roadIds) {
+    const entry     = activeLockers[roadId];
+    const status    = await getPickCodeStatus(entry.pickCode);
+    const statusStr = status === null ? 'NOT FOUND' : String(status);
+
+    if (status === 0) {
+      console.log(`  🔒 Locker ${entry.locker} (code ${entry.pickCode}) — still pending (status=0) → keeping locked`);
+    } else {
+      console.log(`  ✅ Locker ${entry.locker} (code ${entry.pickCode}) — status=${statusStr} → FREED`);
+      delete updated[roadId];
+    }
+  }
+
+  return updated;
 }
 
 async function addPickInfo(locker) {
@@ -115,22 +152,40 @@ async function addPickInfo(locker) {
   return res.body;
 }
 
+/**
+ * Fetch the latest pick code BUT only accept it if it was created in the
+ * last 60 seconds — prevents grabbing a stale/old code.
+ */
 async function getLatestPickCode() {
+  console.log('🔍 Fetching latest code from list...');
   const res = await request(
     `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=1`,
     { method: 'GET', headers: authHeaders() }
   );
   const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
-  return Array.isArray(records) && records.length ? records[0] : null;
+  if (!Array.isArray(records) || !records.length) return null;
+
+  const latest = records[0];
+
+  // Reject if the code is older than 60 seconds (it's a pre-existing code, not ours)
+  if (latest.createTime) {
+    const createdAt = new Date(latest.createTime).getTime();
+    const ageMs     = Date.now() - createdAt;
+    if (ageMs > 60_000) {
+      console.warn(`⚠️  Latest code ${latest.pickCode} is ${Math.round(ageMs/1000)}s old — too stale, ignoring.`);
+      return null;
+    }
+  }
+
+  return latest;
 }
 
-// ── Main logic ────────────────────────────────────────────────────────────────
-
+// ── Main ──────────────────────────────────────────────────────────────────────
 async function findFreeLocker(channels, activeLockers) {
   const activeRoadIds = new Set(Object.keys(activeLockers).map(Number));
 
   console.log(`\n📦 Total channels: ${channels.length}`);
-  console.log(`🔒 Currently active (tracked) lockers: [${[...activeRoadIds].join(', ')}]`);
+  console.log(`🔒 Active (locked) lockers: [${[...activeRoadIds].join(', ')}]`);
 
   channels.forEach(ch => {
     const stock  = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
@@ -143,13 +198,7 @@ async function findFreeLocker(channels, activeLockers) {
     return stock > 0 && !activeRoadIds.has(ch.roadId);
   });
 
-  if (!free.length) {
-    throw new Error(
-      'No free lockers available! ' +
-      'All stocked lockers are already assigned. ' +
-      'Check pickup_codes/active_lockers.json and clear completed entries.'
-    );
-  }
+  if (!free.length) throw new Error('No free lockers available! All stocked lockers are assigned.');
 
   const ch = free[0];
   console.log(`\n✅ Selected: ${ch.roadColumn}-${ch.roadRow} | roadId=${ch.roadId}`);
@@ -168,12 +217,17 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    const channels      = await getAllChannels();
-    const activeLockers = loadActiveLockers();
+    const channels = await getAllChannels();
+
+    // Reconcile tracked lockers — free any whose code is no longer pending
+    let activeLockers = loadActiveLockers();
+    activeLockers     = await reconcileActiveLockers(activeLockers);
+    saveActiveLockers(activeLockers); // save reconciled state before generating
 
     const locker = await findFreeLocker(channels, activeLockers);
     const result = await addPickInfo(locker);
 
+    // Extract pick code from addPickInfo response first
     let pickCode = result?.data?.pickCode
       || (Array.isArray(result?.data) && result.data[0]?.pickCode)
       || result?.pickCode
@@ -182,15 +236,19 @@ async function main() {
       || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
       || null;
 
+    // Only fall back to list if response didn't include the code
     if (!pickCode) {
       console.log('⚠️  pickCode not in response — fetching from list...');
       const latest = await getLatestPickCode();
-      if (latest?.pickCode) { pickCode = latest.pickCode; orderNo = latest.pickOrderNum; }
+      if (latest?.pickCode) {
+        pickCode = latest.pickCode;
+        orderNo  = latest.pickOrderNum;
+      }
     }
 
     if (!pickCode) throw new Error('No pickup code found. Response: ' + JSON.stringify(result));
 
-    // Mark this locker as active in our tracking file
+    // Save this locker as active
     activeLockers[locker.roadId] = {
       pickCode,
       orderNo:   orderNo || null,
