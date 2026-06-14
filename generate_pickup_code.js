@@ -153,31 +153,39 @@ async function addPickInfo(locker) {
 }
 
 /**
- * Fetch the latest pick code BUT only accept it if it was created in the
- * last 60 seconds — prevents grabbing a stale/old code.
+ * Fetch the newest pending pick code for a specific roadId.
+ * Retries up to maxAttempts times with a delay — handles API propagation lag.
+ * No clock/timezone comparison: we identify "our" code by roadId + status=0.
  */
-async function getLatestPickCode() {
-  console.log('🔍 Fetching latest code from list...');
-  const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=1`,
-    { method: 'GET', headers: authHeaders() }
-  );
-  const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
-  if (!Array.isArray(records) || !records.length) return null;
+async function getPickCodeForRoad(roadId, { maxAttempts = 6, delayMs = 3000 } = {}) {
+  console.log(`🔍 Fetching pending pick code for roadId=${roadId} (up to ${maxAttempts} attempts)...`);
 
-  const latest = records[0];
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await request(
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=20&funId=${CONFIG.funId}`,
+      { method: 'GET', headers: authHeaders() }
+    );
+    const records = res.body?.rows || res.body?.data?.records || res.body?.data || [];
+    const list    = Array.isArray(records) ? records : [];
 
-  // Reject if the code is older than 60 seconds (it's a pre-existing code, not ours)
-  if (latest.createTime) {
-    const createdAt = new Date(latest.createTime).getTime();
-    const ageMs     = Date.now() - createdAt;
-    if (ageMs > 60_000) {
-      console.warn(`⚠️  Latest code ${latest.pickCode} is ${Math.round(ageMs/1000)}s old — too stale, ignoring.`);
-      return null;
+    // Find a pending (status=0) code whose roadId matches the locker we just assigned
+    const match = list.find(r => {
+      const rRoadId = r.roadId ?? r.road_id ?? null;
+      const status  = r.pickStatus ?? r.status ?? -1;
+      return String(rRoadId) === String(roadId) && status === 0;
+    });
+
+    if (match) {
+      console.log(`✅ Found code ${match.pickCode} for roadId=${roadId} on attempt ${attempt}`);
+      return match;
     }
+
+    console.log(`  Attempt ${attempt}/${maxAttempts} — code not yet visible, waiting ${delayMs}ms...`);
+    if (attempt < maxAttempts) await new Promise(r => setTimeout(r, delayMs));
   }
 
-  return latest;
+  console.warn(`⚠️  No pending code found for roadId=${roadId} after ${maxAttempts} attempts.`);
+  return null;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -238,11 +246,11 @@ async function main() {
 
     // Only fall back to list if response didn't include the code
     if (!pickCode) {
-      console.log('⚠️  pickCode not in response — fetching from list...');
-      const latest = await getLatestPickCode();
-      if (latest?.pickCode) {
-        pickCode = latest.pickCode;
-        orderNo  = latest.pickOrderNum;
+      console.log('⚠️  pickCode not in response — searching list by roadId...');
+      const match = await getPickCodeForRoad(locker.roadId);
+      if (match?.pickCode) {
+        pickCode = match.pickCode;
+        orderNo  = match.pickOrderNum;
       }
     }
 
