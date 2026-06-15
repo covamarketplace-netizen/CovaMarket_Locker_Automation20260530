@@ -37,27 +37,46 @@ jobs:
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_TOKEN:  ${{ secrets.XYZ_TOKEN }}
-          XYZ_FUN_ID: ${{ secrets.XYZ_FUN_ID }}
+          XYZ_TOKEN:         ${{ secrets.XYZ_TOKEN }}
+          XYZ_FUN_ID:        ${{ secrets.XYZ_FUN_ID }}
+          XYZ_USERNAME:      ${{ secrets.XYZ_USERNAME }}
+          XYZ_PASSWORD:      ${{ secrets.XYZ_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
+          EXIT_CODE=$?
           echo "──────── Output ────────"
           echo "$OUTPUT"
           echo "────────────────────────"
 
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
           PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
-          LOCKER=$(echo "$JSON"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))"    2>/dev/null || echo "")
+          LOCKER=$(echo "$JSON"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))"   2>/dev/null || echo "")
+
+          # Capture new token if script refreshed it
+          NEW_TOKEN=$(echo "$OUTPUT" | grep "NEW_TOKEN:" | sed 's/NEW_TOKEN://' | tail -1)
 
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
           echo "locker=$LOCKER"       >> $GITHUB_OUTPUT
+          echo "new_token=$NEW_TOKEN" >> $GITHUB_OUTPUT
 
           mkdir -p pickup_codes
           echo "$JSON" > pickup_codes/latest.json
 
           echo "📋 active_lockers.json after script ran:"
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING)"
+
+          exit $EXIT_CODE
+
+      - name: Update XYZ_TOKEN secret if refreshed
+        if: steps.generate.outputs.new_token != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "🔑 New token detected — updating XYZ_TOKEN secret..."
+          echo "${{ steps.generate.outputs.new_token }}" | gh secret set XYZ_TOKEN --repo ${{ github.repository }}
+          echo "✅ XYZ_TOKEN secret updated successfully."
 
       - name: Send pickup code to customer
         if: success() && steps.generate.outputs.pick_code != ''
@@ -67,6 +86,7 @@ jobs:
           LOCKER:    ${{ steps.generate.outputs.locker }}
         run: |
           echo "📦 Pickup code $PICK_CODE for order $ORDER_ID (locker $LOCKER)"
+          # TODO: replace above with actual email/WhatsApp/SMS send step
 
       - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
@@ -74,7 +94,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Force-add in case pickup_codes/ is gitignored or not yet tracked
           git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
 
           echo "📋 Git status after add:"
@@ -85,5 +104,5 @@ jobs:
 
           git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
             git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
-          
+
           git push origin main
