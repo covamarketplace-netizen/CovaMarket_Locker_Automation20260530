@@ -83,62 +83,65 @@ function authHeaders(contentType = null) {
 
 // ── CAPTCHA solver via Claude Vision ─────────────────────────────────────────
 /**
- * Fetch the captcha image from XYZ Vending and solve it using Claude Vision.
- * Returns { code: "6381", uuid: "xxxx-..." }
+ * Fetch captcha from /api/captchaImage and solve it with Claude Vision.
+ * Returns { code, uuid, fetchedAt } — caller must POST login IMMEDIATELY after.
+ *
+ * KEY INSIGHT: Captcha TTL is ~30s server-side. We must minimise latency:
+ *   1. Fetch captcha (fresh UUID via _t cache-buster every call)
+ *   2. Send to Claude Haiku instantly (<2s typical response)
+ *   3. POST login right away — no extra sleep before submitting
+ *
+ * Server sends wrong MIME in data URI ("text/plain") — we sniff from magic bytes.
  */
 async function solveCaptcha() {
   if (!CONFIG.anthropicKey) {
     throw new Error('ANTHROPIC_API_KEY secret not set — needed to solve captcha for token refresh.');
   }
 
-  console.log('🖼️  Fetching captcha image...');
+  const t = Date.now();
+  console.log(`🖼️  Fetching fresh captcha (_t=${t})...`);
   const captchaRes = await request(
-    `${CONFIG.baseUrl}/api/captchaImage`,
+    `${CONFIG.baseUrl}/api/captchaImage?_t=${t}`,
     {
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept':     'application/json, text/plain, */*',
-        'Referer':    `${CONFIG.baseUrl}/login`,
+        'User-Agent':    'Mozilla/5.0',
+        'Accept':        'application/json, text/plain, */*',
+        'Referer':       `${CONFIG.baseUrl}/login`,
+        'Cache-Control': 'no-cache',
+        'Pragma':        'no-cache',
       },
     }
   );
 
-  console.log('Captcha response status:', captchaRes.status);
+  if (captchaRes.status !== 200) {
+    throw new Error(`captchaImage fetch failed: HTTP ${captchaRes.status}`);
+  }
 
-  // Response shape: { code: "00000", data: { img: "<base64>", uuid: "..." } }
-  // or             { img: "<base64>", uuid: "..." }
   const captchaData = captchaRes.body?.data || captchaRes.body;
-  const imgBase64   = captchaData?.img  || captchaData?.image || null;
+  const imgBase64   = captchaData?.img || captchaData?.image || null;
   const uuid        = captchaData?.uuid || captchaData?.captchaId || null;
 
+  console.log(`   Captcha UUID: ${uuid}`);
+
   if (!imgBase64 || !uuid) {
-    throw new Error(`Could not extract captcha image/uuid. Body: ${JSON.stringify(captchaRes.body)}`);
+    throw new Error(`Could not extract captcha img/uuid. Body: ${JSON.stringify(captchaRes.body).substring(0, 200)}`);
   }
 
-  // Detect media type from data URI prefix, or sniff from base64 magic bytes
-  let mediaType   = 'image/jpeg'; // default — XYZ Vending captchas are JPEG
-  let cleanBase64 = imgBase64;
+  // Strip ANY data URI prefix — server wrongly declares MIME as "text/plain"
+  const cleanBase64 = imgBase64.replace(/^data:[^;]+;base64,/, '').trim();
 
-  const dataUriMatch = imgBase64.match(/^data:(image\/\w+);base64,(.+)$/);
-  if (dataUriMatch) {
-    mediaType   = dataUriMatch[1];
-    cleanBase64 = dataUriMatch[2];
-  } else {
-    // Sniff magic bytes from raw base64: JPEG starts with /9j (base64 of FF D8)
-    // PNG starts with iVBORw; GIF starts with R0lGOD
-    if (cleanBase64.startsWith('/9j') || cleanBase64.startsWith('/9J')) {
-      mediaType = 'image/jpeg';
-    } else if (cleanBase64.startsWith('iVBORw')) {
-      mediaType = 'image/png';
-    } else if (cleanBase64.startsWith('R0lGOD')) {
-      mediaType = 'image/gif';
-    }
-  }
+  // Sniff actual image format from base64 magic bytes
+  // JPEG FF D8 → "/9j", PNG 89504E47 → "iVBORw", GIF 474946 → "R0lGOD"
+  let mediaType = 'image/jpeg'; // XYZ Vending always sends JPEG captchas
+  if (cleanBase64.startsWith('iVBORw'))      mediaType = 'image/png';
+  else if (cleanBase64.startsWith('R0lGOD')) mediaType = 'image/gif';
+  console.log(`   Sniffed: ${mediaType} (prefix="${cleanBase64.substring(0, 6)}")`);
 
-  console.log(`🤖 Sending captcha to Claude Vision to solve (uuid=${uuid}, type=${mediaType})...`);
+  // Solve IMMEDIATELY after fetch to beat TTL
+  const fetchedAt = Date.now();
+  console.log(`🤖 Solving with Claude Haiku...`);
 
-  // Call Anthropic API
   const anthropicRes = await request(
     'https://api.anthropic.com/v1/messages',
     {
@@ -150,41 +153,40 @@ async function solveCaptcha() {
       },
     },
     {
-      model:      'claude-haiku-4-5-20251001',  // fast + cheap for captcha solving
+      model:      'claude-haiku-4-5-20251001',
       max_tokens: 16,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type:   'image',
-              source: { type: 'base64', media_type: mediaType, data: cleanBase64 },
-            },
-            {
-              type: 'text',
-              text: 'This is a CAPTCHA image from a login form. Please read the characters shown and reply with ONLY the characters, nothing else. No spaces, no explanation.',
-            },
-          ],
-        },
-      ],
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type:   'image',
+            source: { type: 'base64', media_type: mediaType, data: cleanBase64 },
+          },
+          {
+            type: 'text',
+            text: 'Read the CAPTCHA digits/letters and reply with ONLY those characters. No spaces, no explanation, no punctuation.',
+          },
+        ],
+      }],
     }
   );
 
-  const captchaCode = anthropicRes.body?.content?.[0]?.text?.trim() || '';
-  console.log(`✅ Claude solved captcha: "${captchaCode}"`);
+  const elapsed     = Date.now() - fetchedAt;
+  const captchaCode = (anthropicRes.body?.content?.[0]?.text || '').trim().replace(/\s+/g, '');
+  console.log(`✅ Solved: "${captchaCode}" (${elapsed}ms)`);
 
   if (!captchaCode) {
-    throw new Error(`Claude could not read the captcha. Response: ${JSON.stringify(anthropicRes.body)}`);
+    throw new Error(`Claude could not read captcha. Response: ${JSON.stringify(anthropicRes.body)}`);
   }
 
-  return { code: captchaCode, uuid };
+  return { code: captchaCode, uuid, fetchedAt };
 }
 
-// ── JWT Refresh ───────────────────────────────────────────────────────────────
+// ── JWT Refresh ────────────────────────────────────────────────────────────────────────────────
 /**
- * Re-login: fetch captcha → solve with Claude Vision → POST /api/login.
- * Updates CONFIG.token and prints NEW_TOKEN:<token> for GH Actions to capture.
- * Retries up to 3 times in case Claude misreads the captcha.
+ * Re-login: fetch captcha → solve → POST /api/login immediately.
+ * Prints NEW_TOKEN:<token> for GH Actions to capture + update secret.
+ * Retries up to maxAttempts with a brand-new captcha each time.
  */
 async function refreshToken(maxAttempts = 3) {
   if (!CONFIG.username || !CONFIG.password) {
@@ -194,12 +196,14 @@ async function refreshToken(maxAttempts = 3) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`\n🔄 Token refresh attempt ${attempt}/${maxAttempts}...`);
     try {
-      const { code: captchaCode, uuid } = await solveCaptcha();
+      const { code: captchaCode, uuid, fetchedAt } = await solveCaptcha();
+      console.log(`   Captcha age at login POST: ${Date.now() - fetchedAt}ms`);
 
+      // POST login immediately — no sleep, beat the TTL
       const loginRes = await request(
         `${CONFIG.baseUrl}/api/login`,
         {
-          method:  'POST',
+          method: 'POST',
           headers: {
             'Content-Type': 'application/json;charset=UTF-8',
             'User-Agent':   'Mozilla/5.0',
@@ -211,15 +215,14 @@ async function refreshToken(maxAttempts = 3) {
         {
           username: CONFIG.username,
           password: CONFIG.password,
-          code:     captchaCode,   // captcha answer
-          uuid,                    // captcha session id
+          code:     captchaCode,
+          uuid,
         }
       );
 
-      console.log('Login response status:', loginRes.status);
-      console.log('Login response body:',   JSON.stringify(loginRes.body));
+      console.log('Login status:', loginRes.status);
+      console.log('Login body:',   JSON.stringify(loginRes.body));
 
-      // Handle common RuoYi response shapes
       const newToken =
         loginRes.body?.token            ||
         loginRes.body?.data?.token      ||
@@ -228,27 +231,27 @@ async function refreshToken(maxAttempts = 3) {
 
       if (!newToken) {
         const msg = loginRes.body?.msg || loginRes.body?.message || JSON.stringify(loginRes.body);
-        console.warn(`⚠️  Login attempt ${attempt} failed: ${msg}`);
+        console.warn(`⚠️  Attempt ${attempt} failed: ${msg}`);
         if (attempt < maxAttempts) {
-          console.log('   Retrying with a fresh captcha...');
-          await sleep(1000);
+          await sleep(500); // minimal pause before retrying with fresh captcha
           continue;
         }
-        throw new Error(`Re-login failed after ${maxAttempts} attempts. Last response: ${msg}`);
+        throw new Error(`Re-login failed after ${maxAttempts} attempts. Last: ${msg}`);
       }
 
       CONFIG.token = newToken;
-      console.log('✅ Re-login successful. New token obtained.');
+      console.log('✅ Re-login successful!');
       console.log(`NEW_TOKEN:${newToken}`);
       return newToken;
 
     } catch (err) {
       if (attempt >= maxAttempts) throw err;
-      console.warn(`⚠️  Attempt ${attempt} error: ${err.message} — retrying...`);
-      await sleep(1000);
+      console.warn(`⚠️  Attempt ${attempt} threw: ${err.message} — retrying...`);
+      await sleep(500);
     }
   }
 }
+
 
 /**
  * Detect 401 / session-expired responses.
@@ -534,15 +537,12 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    // ── Fetch channels + all pick records in parallel ─────────────────────────
-    console.log('🔍 Fetching channels and pick records...');
-    const [channels, allRecords] = await Promise.all([
-      getAllChannels(),
-      (async () => {
-        console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
-        return fetchAllRecords();
-      })(),
-    ]);
+    // ── Fetch channels first, then pick records (sequential to avoid double-refresh race)
+    console.log('🔍 Fetching channels...');
+    const channels = await getAllChannels();
+
+    console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
+    const allRecords = await fetchAllRecords();
 
     // ── Guard: if channels empty, likely a token issue ────────────────────────
     if (!channels.length) {
