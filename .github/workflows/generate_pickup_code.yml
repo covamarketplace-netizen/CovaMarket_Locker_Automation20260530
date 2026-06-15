@@ -10,6 +10,26 @@ on:
         description: 'Shopify Order ID'
         required: false
         default: 'test-order'
+      customer_name:
+        description: 'Customer Name'
+        required: false
+        default: 'Valued Customer'
+      customer_email:
+        description: 'Customer Email'
+        required: false
+        default: 'alejandra.evander92@gmail.com'
+      pickup_location:
+        description: 'Pickup Location'
+        required: false
+        default: 'CovaMarket Locker'
+      pickup_date:
+        description: 'Pickup Date'
+        required: false
+        default: 'N/A'
+      pickup_time:
+        description: 'Pickup Time'
+        required: false
+        default: 'N/A'
 
 jobs:
   generate-pickup-code:
@@ -51,12 +71,8 @@ jobs:
           PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
           LOCKER=$(echo "$JSON"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))"   2>/dev/null || echo "")
 
-          # Capture new token if script refreshed it
-          NEW_TOKEN=$(echo "$OUTPUT" | grep "NEW_TOKEN:" | sed 's/NEW_TOKEN://' | tail -1)
-
           echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
           echo "locker=$LOCKER"       >> $GITHUB_OUTPUT
-          echo "new_token=$NEW_TOKEN" >> $GITHUB_OUTPUT
 
           mkdir -p pickup_codes
           echo "$JSON" > pickup_codes/latest.json
@@ -66,15 +82,22 @@ jobs:
 
           exit $EXIT_CODE
 
-      - name: Send pickup code to customer
+      - name: Send pickup code email to customer
         if: success() && steps.generate.outputs.pick_code != ''
         env:
-          PICK_CODE: ${{ steps.generate.outputs.pick_code }}
-          ORDER_ID:  ${{ github.event.inputs.order_id }}
-          LOCKER:    ${{ steps.generate.outputs.locker }}
+          GMAIL_USER:      covamarketplace@gmail.com
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+          TO_EMAIL:        ${{ github.event.inputs.customer_email || 'alejandra.evander92@gmail.com' }}
+          CUSTOMER_NAME:   ${{ github.event.inputs.customer_name  || 'Valued Customer' }}
+          ORDER_ID:        ${{ github.event.inputs.order_id       || 'test-order' }}
+          PICK_CODE:       ${{ steps.generate.outputs.pick_code }}
+          LOCKER:          ${{ steps.generate.outputs.locker }}
+          PICKUP_LOCATION: ${{ github.event.inputs.pickup_location || 'CovaMarket Locker' }}
+          PICKUP_DATE:     ${{ github.event.inputs.pickup_date     || 'N/A' }}
+          PICKUP_TIME:     ${{ github.event.inputs.pickup_time     || 'N/A' }}
         run: |
-          echo "📦 Pickup code $PICK_CODE for order $ORDER_ID (locker $LOCKER)"
-          # TODO: replace above with actual email/WhatsApp/SMS send step
+          echo "📧 Sending pickup code email..."
+          node send_email.js
 
       - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
@@ -86,9 +109,6 @@ jobs:
 
           echo "📋 Git status after add:"
           git status
-
-          echo "📋 Git diff staged:"
-          git diff --staged --stat
 
           git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
             git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
