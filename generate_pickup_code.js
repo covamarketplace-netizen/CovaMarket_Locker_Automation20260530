@@ -116,10 +116,27 @@ async function solveCaptcha() {
     throw new Error(`Could not extract captcha image/uuid. Body: ${JSON.stringify(captchaRes.body)}`);
   }
 
-  // Strip data URI prefix if present (e.g. "data:image/png;base64,...")
-  const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, '');
+  // Detect media type from data URI prefix, or sniff from base64 magic bytes
+  let mediaType   = 'image/jpeg'; // default — XYZ Vending captchas are JPEG
+  let cleanBase64 = imgBase64;
 
-  console.log(`🤖 Sending captcha to Claude Vision to solve (uuid=${uuid})...`);
+  const dataUriMatch = imgBase64.match(/^data:(image\/\w+);base64,(.+)$/);
+  if (dataUriMatch) {
+    mediaType   = dataUriMatch[1];
+    cleanBase64 = dataUriMatch[2];
+  } else {
+    // Sniff magic bytes from raw base64: JPEG starts with /9j (base64 of FF D8)
+    // PNG starts with iVBORw; GIF starts with R0lGOD
+    if (cleanBase64.startsWith('/9j') || cleanBase64.startsWith('/9J')) {
+      mediaType = 'image/jpeg';
+    } else if (cleanBase64.startsWith('iVBORw')) {
+      mediaType = 'image/png';
+    } else if (cleanBase64.startsWith('R0lGOD')) {
+      mediaType = 'image/gif';
+    }
+  }
+
+  console.log(`🤖 Sending captcha to Claude Vision to solve (uuid=${uuid}, type=${mediaType})...`);
 
   // Call Anthropic API
   const anthropicRes = await request(
@@ -133,15 +150,15 @@ async function solveCaptcha() {
       },
     },
     {
-      model:      'claude-opus-4-6',
-      max_tokens: 64,
+      model:      'claude-haiku-4-5-20251001',  // fast + cheap for captcha solving
+      max_tokens: 16,
       messages: [
         {
           role: 'user',
           content: [
             {
               type:   'image',
-              source: { type: 'base64', media_type: 'image/png', data: cleanBase64 },
+              source: { type: 'base64', media_type: mediaType, data: cleanBase64 },
             },
             {
               type: 'text',
@@ -278,13 +295,20 @@ function saveActiveLockers(data) {
 
 // ── Stale tracker cleanup ─────────────────────────────────────────────────────
 /**
- * Remove entries from active_lockers.json whose pick codes are no longer
- * pending (status != 0) in the live API. This prevents the tracker from
- * blocking lockers that have already been collected or expired.
+ * Remove entries from active_lockers.json if ANY of the following:
+ * 1. Pick code is not status=0 (pending) in the live API — collected/expired/invalid
+ * 2. Pick code appears in the API with a non-zero status (explicitly invalid)
+ * 3. Entry is older than MAX_AGE_HOURS (safety net for codes never redeemed)
+ *
+ * "Invalid pickup code" in XYZ Vending UI = the code was generated but the locker
+ * never dispensed (hardware fault, or the API record was voided). These are NOT
+ * status=0 so they correctly get cleaned here.
  */
 async function cleanStaleTrackerEntries(allRecords) {
   const activeLockers = loadActiveLockers();
   if (!Object.keys(activeLockers).length) return activeLockers;
+
+  const MAX_AGE_HOURS = 24; // remove tracker entries older than this regardless
 
   // Build set of pickCodes that are currently pending (status=0) in the API
   const livePendingCodes = new Set(
@@ -294,10 +318,21 @@ async function cleanStaleTrackerEntries(allRecords) {
       .filter(Boolean)
   );
 
+  const now = Date.now();
   let cleaned = 0;
   for (const [roadId, entry] of Object.entries(activeLockers)) {
-    if (!livePendingCodes.has(String(entry.pickCode))) {
-      console.log(`🧹 Removing stale tracker entry: roadId=${roadId} locker=${entry.locker} code=${entry.pickCode} (no longer pending in API)`);
+    const ageHours = entry.createdAt
+      ? (now - new Date(entry.createdAt).getTime()) / 3600000
+      : MAX_AGE_HOURS + 1;
+
+    const isStaleByAPI = !livePendingCodes.has(String(entry.pickCode));
+    const isStaleByAge = ageHours > MAX_AGE_HOURS;
+
+    if (isStaleByAPI || isStaleByAge) {
+      const reason = isStaleByAPI
+        ? `code ${entry.pickCode} not pending in API (invalid/collected/expired)`
+        : `entry older than ${MAX_AGE_HOURS}h (${ageHours.toFixed(1)}h old)`;
+      console.log(`🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — ${reason}`);
       delete activeLockers[roadId];
       cleaned++;
     }
