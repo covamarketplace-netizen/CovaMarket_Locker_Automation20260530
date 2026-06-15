@@ -16,36 +16,45 @@
  * - After: poll a TARGETED query (goodsName filter + status=0) for a new orderNum
  *   that wasn't in the before-snapshot. This avoids all global list cache issues.
  *
- * FIX (2026-06-15): locker label was built as column-row; corrected to row-column
- *   to match XYZ Vending UI display format (e.g. "2-1" = row 2, column 1).
- *   mkLocker() now returns lockerLabel as single source of truth.
+ * FIXES:
+ * - (2026-06-15) locker label corrected from column-row to row-column to match UI.
+ * - (2026-06-15) Auto JWT refresh with CAPTCHA solving via Claude Vision API.
+ *   Flow: GET /api/captchaImage → base64 image → Claude reads digits → POST /api/login
+ * - (2026-06-15) Stale tracker cleanup: removes active_lockers entries whose
+ *   pick codes are no longer pending (status != 0) in the live API.
  */
 
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
+const https  = require('https');
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
 
 const CONFIG = {
-  baseUrl:      'https://xzyvend.com',
-  token:        process.env.XYZ_TOKEN || '',
-  funId:        parseInt(process.env.XYZ_FUN_ID || '716'),
-  generateNum:  1,
-  pickType:     0,
-  trackingFile: path.join(__dirname, 'pickup_codes', 'active_lockers.json'),
+  baseUrl:        'https://xzyvend.com',
+  token:          process.env.XYZ_TOKEN        || '',
+  username:       process.env.XYZ_USERNAME     || '',
+  password:       process.env.XYZ_PASSWORD     || '',
+  anthropicKey:   process.env.ANTHROPIC_API_KEY|| '',
+  funId:          parseInt(process.env.XYZ_FUN_ID || '716'),
+  generateNum:    1,
+  pickType:       0,
+  trackingFile:   path.join(__dirname, 'pickup_codes', 'active_lockers.json'),
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ── HTTP ──────────────────────────────────────────────────────────────────────
 function request(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const parsed  = new URL(url);
+    const lib     = parsed.protocol === 'https:' ? https : http;
     const reqOpts = {
       hostname: parsed.hostname,
       path:     parsed.pathname + parsed.search,
       method:   options.method || 'GET',
       headers:  options.headers || {},
     };
-    const req = https.request(reqOpts, (res) => {
+    const req = lib.request(reqOpts, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
@@ -72,6 +81,187 @@ function authHeaders(contentType = null) {
   return h;
 }
 
+// ── CAPTCHA solver via Claude Vision ─────────────────────────────────────────
+/**
+ * Fetch the captcha image from XYZ Vending and solve it using Claude Vision.
+ * Returns { code: "6381", uuid: "xxxx-..." }
+ */
+async function solveCaptcha() {
+  if (!CONFIG.anthropicKey) {
+    throw new Error('ANTHROPIC_API_KEY secret not set — needed to solve captcha for token refresh.');
+  }
+
+  console.log('🖼️  Fetching captcha image...');
+  const captchaRes = await request(
+    `${CONFIG.baseUrl}/api/captchaImage`,
+    {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept':     'application/json, text/plain, */*',
+        'Referer':    `${CONFIG.baseUrl}/login`,
+      },
+    }
+  );
+
+  console.log('Captcha response status:', captchaRes.status);
+
+  // Response shape: { code: "00000", data: { img: "<base64>", uuid: "..." } }
+  // or             { img: "<base64>", uuid: "..." }
+  const captchaData = captchaRes.body?.data || captchaRes.body;
+  const imgBase64   = captchaData?.img  || captchaData?.image || null;
+  const uuid        = captchaData?.uuid || captchaData?.captchaId || null;
+
+  if (!imgBase64 || !uuid) {
+    throw new Error(`Could not extract captcha image/uuid. Body: ${JSON.stringify(captchaRes.body)}`);
+  }
+
+  // Strip data URI prefix if present (e.g. "data:image/png;base64,...")
+  const cleanBase64 = imgBase64.replace(/^data:image\/\w+;base64,/, '');
+
+  console.log(`🤖 Sending captcha to Claude Vision to solve (uuid=${uuid})...`);
+
+  // Call Anthropic API
+  const anthropicRes = await request(
+    'https://api.anthropic.com/v1/messages',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type':      'application/json',
+        'x-api-key':         CONFIG.anthropicKey,
+        'anthropic-version': '2023-06-01',
+      },
+    },
+    {
+      model:      'claude-opus-4-6',
+      max_tokens: 64,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type:   'image',
+              source: { type: 'base64', media_type: 'image/png', data: cleanBase64 },
+            },
+            {
+              type: 'text',
+              text: 'This is a CAPTCHA image from a login form. Please read the characters shown and reply with ONLY the characters, nothing else. No spaces, no explanation.',
+            },
+          ],
+        },
+      ],
+    }
+  );
+
+  const captchaCode = anthropicRes.body?.content?.[0]?.text?.trim() || '';
+  console.log(`✅ Claude solved captcha: "${captchaCode}"`);
+
+  if (!captchaCode) {
+    throw new Error(`Claude could not read the captcha. Response: ${JSON.stringify(anthropicRes.body)}`);
+  }
+
+  return { code: captchaCode, uuid };
+}
+
+// ── JWT Refresh ───────────────────────────────────────────────────────────────
+/**
+ * Re-login: fetch captcha → solve with Claude Vision → POST /api/login.
+ * Updates CONFIG.token and prints NEW_TOKEN:<token> for GH Actions to capture.
+ * Retries up to 3 times in case Claude misreads the captcha.
+ */
+async function refreshToken(maxAttempts = 3) {
+  if (!CONFIG.username || !CONFIG.password) {
+    throw new Error('XYZ_USERNAME / XYZ_PASSWORD secrets not set. Cannot auto-refresh JWT.');
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    console.log(`\n🔄 Token refresh attempt ${attempt}/${maxAttempts}...`);
+    try {
+      const { code: captchaCode, uuid } = await solveCaptcha();
+
+      const loginRes = await request(
+        `${CONFIG.baseUrl}/api/login`,
+        {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json;charset=UTF-8',
+            'User-Agent':   'Mozilla/5.0',
+            'Accept':       'application/json, text/plain, */*',
+            'Origin':       CONFIG.baseUrl,
+            'Referer':      `${CONFIG.baseUrl}/login`,
+          },
+        },
+        {
+          username: CONFIG.username,
+          password: CONFIG.password,
+          code:     captchaCode,   // captcha answer
+          uuid,                    // captcha session id
+        }
+      );
+
+      console.log('Login response status:', loginRes.status);
+      console.log('Login response body:',   JSON.stringify(loginRes.body));
+
+      // Handle common RuoYi response shapes
+      const newToken =
+        loginRes.body?.token            ||
+        loginRes.body?.data?.token      ||
+        loginRes.body?.data?.adminToken ||
+        null;
+
+      if (!newToken) {
+        const msg = loginRes.body?.msg || loginRes.body?.message || JSON.stringify(loginRes.body);
+        console.warn(`⚠️  Login attempt ${attempt} failed: ${msg}`);
+        if (attempt < maxAttempts) {
+          console.log('   Retrying with a fresh captcha...');
+          await sleep(1000);
+          continue;
+        }
+        throw new Error(`Re-login failed after ${maxAttempts} attempts. Last response: ${msg}`);
+      }
+
+      CONFIG.token = newToken;
+      console.log('✅ Re-login successful. New token obtained.');
+      console.log(`NEW_TOKEN:${newToken}`);
+      return newToken;
+
+    } catch (err) {
+      if (attempt >= maxAttempts) throw err;
+      console.warn(`⚠️  Attempt ${attempt} error: ${err.message} — retrying...`);
+      await sleep(1000);
+    }
+  }
+}
+
+/**
+ * Detect 401 / session-expired responses.
+ */
+function isUnauthorized(result) {
+  return (
+    result?.status === 401 ||
+    result?.body?.code === '401' ||
+    result?.body?.code === 401   ||
+    result?.body?.msg  === 'Not logged in' ||
+    result?.body?.msg  === '请重新登录'    ||
+    result?.body?.msg  === 'token已过期'   ||
+    result?.body?.msg  === 'Token已过期'
+  );
+}
+
+/**
+ * Wrapper: run fn(); if 401, refresh token and retry once.
+ */
+async function withAutoRefresh(fn) {
+  const result = await fn();
+  if (isUnauthorized(result)) {
+    console.warn('⚠️  Unauthorised response — refreshing token...');
+    await refreshToken();
+    return fn();
+  }
+  return result;
+}
+
+// ── File helpers ──────────────────────────────────────────────────────────────
 function loadActiveLockers() {
   try {
     if (!fs.existsSync(CONFIG.trackingFile)) return {};
@@ -86,23 +276,66 @@ function saveActiveLockers(data) {
   console.log(`💾 Saved active_lockers.json (${Object.keys(data).length} entries)`);
 }
 
+// ── Stale tracker cleanup ─────────────────────────────────────────────────────
+/**
+ * Remove entries from active_lockers.json whose pick codes are no longer
+ * pending (status != 0) in the live API. This prevents the tracker from
+ * blocking lockers that have already been collected or expired.
+ */
+async function cleanStaleTrackerEntries(allRecords) {
+  const activeLockers = loadActiveLockers();
+  if (!Object.keys(activeLockers).length) return activeLockers;
+
+  // Build set of pickCodes that are currently pending (status=0) in the API
+  const livePendingCodes = new Set(
+    allRecords
+      .filter(r => (r.pickStatus ?? r.status ?? -1) === 0)
+      .map(r => r.pickCode)
+      .filter(Boolean)
+  );
+
+  let cleaned = 0;
+  for (const [roadId, entry] of Object.entries(activeLockers)) {
+    if (!livePendingCodes.has(String(entry.pickCode))) {
+      console.log(`🧹 Removing stale tracker entry: roadId=${roadId} locker=${entry.locker} code=${entry.pickCode} (no longer pending in API)`);
+      delete activeLockers[roadId];
+      cleaned++;
+    }
+  }
+
+  if (cleaned > 0) {
+    saveActiveLockers(activeLockers);
+    console.log(`🧹 Cleaned ${cleaned} stale tracker entry/entries.`);
+  } else {
+    console.log('✅ Tracker is clean — all entries still pending in API.');
+  }
+
+  return activeLockers;
+}
+
 // ── Channels ──────────────────────────────────────────────────────────────────
 async function getAllChannels() {
   console.log('🔍 Getting all channels...');
-  const res = await request(
-    `${CONFIG.baseUrl}/api/roadInfo/getRoadGoodsByFunId?funId=${CONFIG.funId}&_t=${Date.now()}`,
-    { method: 'GET', headers: authHeaders() }
+  const res = await withAutoRefresh(() =>
+    request(
+      `${CONFIG.baseUrl}/api/roadInfo/getRoadGoodsByFunId?funId=${CONFIG.funId}&_t=${Date.now()}`,
+      { method: 'GET', headers: authHeaders() }
+    )
   );
   if (res.status !== 200) throw new Error(`getRoadGoodsByFunId failed: ${res.status}`);
   const channels = res.body?.data || res.body?.rows || res.body || [];
-  return Array.isArray(channels) ? channels : [];
+  const result   = Array.isArray(channels) ? channels : [];
+  console.log(`  📦 Got ${result.length} channels from API`);
+  return result;
 }
 
-// ── Full list fetch (for pending detection only) ───────────────────────────────
+// ── Full list fetch ───────────────────────────────────────────────────────────
 async function fetchAllRecords(size = 50) {
-  const first    = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
-    { method: 'GET', headers: authHeaders() }
+  const first = await withAutoRefresh(() =>
+    request(
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
+      { method: 'GET', headers: authHeaders() }
+    )
   );
   const firstRecs = first.body?.data?.records || first.body?.rows || first.body?.data || [];
   const total     = first.body?.data?.total   || first.body?.total || 0;
@@ -111,9 +344,11 @@ async function fetchAllRecords(size = 50) {
 
   const allRecords = Array.isArray(firstRecs) ? [...firstRecs] : [];
   for (let page = 2; page <= lastPage; page++) {
-    const res  = await request(
-      `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
-      { method: 'GET', headers: authHeaders() }
+    const res = await withAutoRefresh(() =>
+      request(
+        `${CONFIG.baseUrl}/api/pickInfo/list?current=${page}&size=${size}&funId=${CONFIG.funId}&_t=${Date.now()}`,
+        { method: 'GET', headers: authHeaders() }
+      )
     );
     const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
     if (Array.isArray(recs) && recs.length) allRecords.push(...recs);
@@ -122,14 +357,7 @@ async function fetchAllRecords(size = 50) {
   return allRecords;
 }
 
-/**
- * Pending detection: goodsName = "Locker 1-6" (confirmed from logs).
- * Returns Set of locker names that have status=0 codes.
- */
-async function getPendingLockerNames() {
-  console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
-  const allRecords = await fetchAllRecords();
-
+async function getPendingLockerNames(allRecords) {
   const pending = allRecords.filter(r => (r.pickStatus ?? r.status ?? -1) === 0);
   const names   = new Set(pending.map(r => r.goodsName).filter(Boolean));
 
@@ -142,35 +370,24 @@ async function getPendingLockerNames() {
 }
 
 // ── Targeted query for a specific locker ─────────────────────────────────────
-/**
- * Query pick records filtered to a specific goodsName (locker label).
- * The server may support goodsName as a filter param — if not, we fetch page 1
- * with pickStatus=0 and filter client-side.
- * Returns array of matching records.
- */
 async function fetchPendingForLocker(lockerName) {
-  // Try server-side goodsName filter first
-  const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=50&funId=${CONFIG.funId}&goodsName=${encodeURIComponent(lockerName)}&pickStatus=0&_t=${Date.now()}`,
-    { method: 'GET', headers: authHeaders() }
+  const res = await withAutoRefresh(() =>
+    request(
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=50&funId=${CONFIG.funId}&goodsName=${encodeURIComponent(lockerName)}&pickStatus=0&_t=${Date.now()}`,
+      { method: 'GET', headers: authHeaders() }
+    )
   );
   const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
   if (!Array.isArray(recs)) return [];
-
-  // Filter client-side too in case server ignores the param
   return recs.filter(r =>
     r.goodsName === lockerName &&
     (r.pickStatus ?? r.status ?? -1) === 0
   );
 }
 
-/**
- * Snapshot: get all current pending orderNums for THIS locker before addPickInfo.
- * Used to detect which record is genuinely new after the call.
- */
 async function snapshotLockerPending(lockerName) {
   console.log(`📸 Snapshotting pending codes for "${lockerName}"...`);
-  const recs = await fetchPendingForLocker(lockerName);
+  const recs     = await fetchPendingForLocker(lockerName);
   const orderNos = new Set(recs.map(r => r.pickOrderNum).filter(Boolean));
   const codes    = new Set(recs.map(r => r.pickCode).filter(Boolean));
   console.log(`  Found ${recs.length} existing pending record(s): orderNos=[${[...orderNos].join(', ')}] codes=[${[...codes].join(', ')}]`);
@@ -186,23 +403,19 @@ async function addPickInfo(locker) {
     generateNum:   CONFIG.generateNum,
     goodsPickList: [{ goodsId: locker.goodsId, roadId: locker.roadId }],
   };
-  const res = await request(
-    `${CONFIG.baseUrl}/api/pickInfo/addPickInfo`,
-    { method: 'POST', headers: authHeaders('application/json;charset=UTF-8') },
-    body
+  const res = await withAutoRefresh(() =>
+    request(
+      `${CONFIG.baseUrl}/api/pickInfo/addPickInfo`,
+      { method: 'POST', headers: authHeaders('application/json;charset=UTF-8') },
+      body
+    )
   );
   console.log('addPickInfo status:', res.status);
   console.log('addPickInfo response:', JSON.stringify(res.body));
   return res.body;
 }
 
-/**
- * Poll TARGETED query for this specific locker until a new pickOrderNum appears.
- * This avoids global list cache completely — we only look at records for our locker.
- *
- * Waits 5s before first attempt, then 5s between each.
- * 15 attempts × 5s = 75s max.
- */
+// ── Poll for new code ─────────────────────────────────────────────────────────
 async function waitForNewCodeForLocker(lockerName, beforeOrderNos, beforeCodes, { maxAttempts = 15, delayMs = 5000 } = {}) {
   console.log(`\n⏳ Polling targeted query for "${lockerName}" (up to ${maxAttempts * delayMs / 1000}s)...`);
   console.log(`   Before: orderNos=[${[...beforeOrderNos].join(', ')}] codes=[${[...beforeCodes].join(', ')}]`);
@@ -213,7 +426,6 @@ async function waitForNewCodeForLocker(lockerName, beforeOrderNos, beforeCodes, 
     console.log(`  Attempt ${attempt}/${maxAttempts} — found ${recs.length} pending record(s) for "${lockerName}"`);
     recs.forEach(r => console.log(`    code=${r.pickCode} orderNo=${r.pickOrderNum} status=${r.pickStatus ?? r.status}`));
 
-    // New record = orderNum not seen before OR (no orderNums exist) code not seen before
     const newRec = recs.find(r => {
       if (r.pickOrderNum) return !beforeOrderNos.has(r.pickOrderNum);
       if (r.pickCode)     return !beforeCodes.has(r.pickCode);
@@ -231,19 +443,31 @@ async function waitForNewCodeForLocker(lockerName, beforeOrderNos, beforeCodes, 
 }
 
 // ── Locker selection ──────────────────────────────────────────────────────────
-async function findFreeLocker(channels, pendingLockerNames) {
-  const activeLockers  = loadActiveLockers();
-  const activeRoadIds  = new Set(Object.keys(activeLockers));
+function mkLocker(ch) {
+  const lockerLabel = `${ch.roadRow}-${ch.roadColumn}`;  // ✅ row-column matches UI
+  const lockerName  = `Locker ${lockerLabel}`;
+  console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
+  return {
+    goodsId:     ch.goodsId,
+    roadId:      ch.roadId,
+    row:         ch.roadRow,
+    column:      ch.roadColumn,
+    lockerLabel,
+    lockerName,
+  };
+}
+
+async function findFreeLocker(channels, pendingLockerNames, cleanedActiveLockers) {
+  const activeRoadIds = new Set(Object.keys(cleanedActiveLockers));
 
   console.log(`\n📦 Total channels: ${channels.length}`);
-  console.log(`📋 active_lockers.json entries: [${[...activeRoadIds].join(', ')}]`);
+  console.log(`📋 active_lockers.json entries after cleanup: [${[...activeRoadIds].join(', ')}]`);
 
   channels.forEach(ch => {
     const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
     const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
     const hasPending = pendingLockerNames.has(lockerName);
     const isActive   = activeRoadIds.has(String(ch.roadId));
-    // FIX: display as row-column to match UI
     console.log(`  ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingAPI=${hasPending} | inTracker=${isActive}`);
   });
 
@@ -254,37 +478,18 @@ async function findFreeLocker(channels, pendingLockerNames) {
   });
 
   if (!free.length) {
-    // Fallback: ignore tracker, use API state only
-    console.warn('⚠️  No free locker excluding tracker — falling back to API pending state only');
+    // Fallback: ignore tracker (already cleaned), use API pending state only
+    console.warn('⚠️  No free locker (tracker + API) — falling back to API pending state only');
     const free2 = channels.filter(ch => {
       const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
       const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
       return stock > 0 && !pendingLockerNames.has(lockerName);
     });
-    if (!free2.length) throw new Error('No free lockers available!');
+    if (!free2.length) throw new Error('No free lockers available — all lockers occupied or out of stock!');
     return mkLocker(free2[0]);
   }
 
   return mkLocker(free[0]);
-}
-
-/**
- * Build locker object from a channel record.
- * lockerLabel = "row-column" (e.g. "2-1") — matches XYZ Vending UI.
- * lockerName  = "Locker row-column"        — used for API goodsName filter.
- */
-function mkLocker(ch) {
-  const lockerLabel = `${ch.roadRow}-${ch.roadColumn}`;   // ✅ FIX: row-column
-  const lockerName  = `Locker ${lockerLabel}`;
-  console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
-  return {
-    goodsId:     ch.goodsId,
-    roadId:      ch.roadId,
-    row:         ch.roadRow,
-    column:      ch.roadColumn,
-    lockerLabel,   // single source of truth for output (e.g. "2-1")
-    lockerName,    // used for API queries (e.g. "Locker 2-1")
-  };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -294,14 +499,41 @@ async function main() {
     console.log('🔑 Using stored JWT token');
     console.log(`📦 funId=${CONFIG.funId}\n`);
 
-    const channels           = await getAllChannels();
-    const pendingLockerNames = await getPendingLockerNames();
-    const locker             = await findFreeLocker(channels, pendingLockerNames);
+    // ── Fetch channels + all pick records in parallel ─────────────────────────
+    console.log('🔍 Fetching channels and pick records...');
+    const [channels, allRecords] = await Promise.all([
+      getAllChannels(),
+      (async () => {
+        console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
+        return fetchAllRecords();
+      })(),
+    ]);
+
+    // ── Guard: if channels empty, likely a token issue ────────────────────────
+    if (!channels.length) {
+      console.warn('⚠️  Got 0 channels — token may have expired. Attempting refresh...');
+      await refreshToken();
+      // Retry channels fetch after refresh
+      const retried = await getAllChannels();
+      if (!retried.length) {
+        throw new Error('Still got 0 channels after token refresh. Check funId or account access.');
+      }
+      channels.push(...retried);
+    }
+
+    // ── Pending locker names ──────────────────────────────────────────────────
+    const pendingLockerNames = await getPendingLockerNames(allRecords);
+
+    // ── Clean stale tracker entries ───────────────────────────────────────────
+    const cleanedActiveLockers = await cleanStaleTrackerEntries(allRecords);
+
+    // ── Find free locker ──────────────────────────────────────────────────────
+    const locker = await findFreeLocker(channels, pendingLockerNames, cleanedActiveLockers);
 
     // ── Snapshot BEFORE ───────────────────────────────────────────────────────
     const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker.lockerName);
 
-    // ── Create ────────────────────────────────────────────────────────────────
+    // ── Create pickup code ────────────────────────────────────────────────────
     const result = await addPickInfo(locker);
     if (result?.code !== '00000') {
       throw new Error(`addPickInfo failed: ${JSON.stringify(result)}`);
@@ -319,7 +551,6 @@ async function main() {
     if (pickCode) {
       console.log(`✅ pickCode in response: ${pickCode}`);
     } else {
-      // ── Targeted poll ─────────────────────────────────────────────────────
       const newRec = await waitForNewCodeForLocker(locker.lockerName, beforeOrderNos, beforeCodes);
       if (newRec) {
         pickCode = newRec.pickCode;
@@ -340,7 +571,7 @@ async function main() {
     activeLockers[locker.roadId] = {
       pickCode,
       orderNo:   orderNo || null,
-      locker:    locker.lockerLabel,   // ✅ FIX: was column-row, now row-column
+      locker:    locker.lockerLabel,
       goodsId:   locker.goodsId,
       createdAt: new Date().toISOString(),
     };
@@ -349,14 +580,14 @@ async function main() {
     console.log('\n═══════════════════════════════════');
     console.log(`✅ PICKUP CODE : ${pickCode}`);
     console.log(`📋 ORDER NO   : ${orderNo || 'N/A'}`);
-    console.log(`📦 LOCKER     : ${locker.lockerLabel} (roadId=${locker.roadId})`);  // ✅ FIX
+    console.log(`📦 LOCKER     : ${locker.lockerLabel} (roadId=${locker.roadId})`);
     console.log('═══════════════════════════════════\n');
 
     console.log('OUTPUT_JSON:' + JSON.stringify({
       success: true,
       pickCode,
       orderNo,
-      locker:      locker.lockerLabel,   // ✅ FIX: was column-row, now row-column
+      locker:      locker.lockerLabel,
       funId:       CONFIG.funId,
       goodsId:     locker.goodsId,
       roadId:      locker.roadId,
