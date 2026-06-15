@@ -32,9 +32,6 @@ const path   = require('path');
 const CONFIG = {
   baseUrl:        'https://xzyvend.com',
   token:          process.env.XYZ_TOKEN        || '',
-  username:       process.env.XYZ_USERNAME     || '',
-  password:       process.env.XYZ_PASSWORD     || '',
-  anthropicKey:   process.env.ANTHROPIC_API_KEY|| '',
   funId:          parseInt(process.env.XYZ_FUN_ID || '716'),
   generateNum:    1,
   pickType:       0,
@@ -83,173 +80,47 @@ function authHeaders(contentType = null) {
 
 // ── CAPTCHA solver via Claude Vision ─────────────────────────────────────────
 /**
- * Fetch captcha from /api/captchaImage and solve it with Claude Vision.
- * Returns { code, uuid, fetchedAt } — caller must POST login IMMEDIATELY after.
+ * TOKEN REFRESH STRATEGY:
+ * XYZ Vending login requires a CAPTCHA that is difficult to solve reliably
+ * via automation. Instead of fighting the captcha, we use a simple manual
+ * update flow:
  *
- * KEY INSIGHT: Captcha TTL is ~30s server-side. We must minimise latency:
- *   1. Fetch captcha (fresh UUID via _t cache-buster every call)
- *   2. Send to Claude Haiku instantly (<2s typical response)
- *   3. POST login right away — no extra sleep before submitting
+ * WHEN TOKEN EXPIRES:
+ *   1. The script detects 401 and prints a clear error message
+ *   2. You log into xzyvend.com in your browser (takes 30s)
+ *   3. Open DevTools → Network → copy the Authorization header value
+ *   4. Run: gh secret set XYZ_TOKEN --body "eyJhbGci..."
+ *   5. Re-run the workflow
  *
- * Server sends wrong MIME in data URI ("text/plain") — we sniff from magic bytes.
+ * PROACTIVE REFRESH (recommended):
+ *   - JWT tokens from this system typically last 7-30 days
+ *   - Add a monthly reminder to refresh the token before it expires
+ *   - The script prints TOKEN_AGE info to help track this
+ *
+ * To fully automate, a browser-based solution (Puppeteer/Playwright) would
+ * be needed to handle the visual CAPTCHA reliably. Out of scope for now.
  */
-async function solveCaptcha() {
-  if (!CONFIG.anthropicKey) {
-    throw new Error('ANTHROPIC_API_KEY secret not set — needed to solve captcha for token refresh.');
-  }
+async function refreshToken() {
+  // Decode JWT to check expiry and give useful info
+  try {
+    const parts   = CONFIG.token.split('.');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    const exp     = payload.exp ? new Date(payload.exp * 1000).toISOString() : 'unknown';
+    const iat     = payload.iat ? new Date(payload.iat * 1000).toISOString() : 'unknown';
+    console.log(`   JWT issued:  ${iat}`);
+    console.log(`   JWT expires: ${exp}`);
+  } catch { /* ignore JWT parse errors */ }
 
-  const t = Date.now();
-  console.log(`🖼️  Fetching fresh captcha (_t=${t})...`);
-  const captchaRes = await request(
-    `${CONFIG.baseUrl}/api/captchaImage?_t=${t}`,
-    {
-      method: 'GET',
-      headers: {
-        'User-Agent':    'Mozilla/5.0',
-        'Accept':        'application/json, text/plain, */*',
-        'Referer':       `${CONFIG.baseUrl}/login`,
-        'Cache-Control': 'no-cache',
-        'Pragma':        'no-cache',
-      },
-    }
+  throw new Error(
+    'XYZ_TOKEN has expired.\n' +
+    '\nTo update it (takes ~30 seconds):\n' +
+    '  1. Open https://xzyvend.com in your browser and log in\n' +
+    '  2. Open DevTools (F12) → Network tab → click any API request\n' +
+    '  3. Copy the Authorization header value (starts with eyJ...)\n' +
+    '  4. Run: gh secret set XYZ_TOKEN --body "eyJhbGci..."\n' +
+    '     Or update it at: https://github.com/YOUR_REPO/settings/secrets/actions\n' +
+    '  5. Re-run this workflow'
   );
-
-  if (captchaRes.status !== 200) {
-    throw new Error(`captchaImage fetch failed: HTTP ${captchaRes.status}`);
-  }
-
-  const captchaData = captchaRes.body?.data || captchaRes.body;
-  const imgBase64   = captchaData?.img || captchaData?.image || null;
-  const uuid        = captchaData?.uuid || captchaData?.captchaId || null;
-
-  console.log(`   Captcha UUID: ${uuid}`);
-
-  if (!imgBase64 || !uuid) {
-    throw new Error(`Could not extract captcha img/uuid. Body: ${JSON.stringify(captchaRes.body).substring(0, 200)}`);
-  }
-
-  // Strip ANY data URI prefix — server wrongly declares MIME as "text/plain"
-  const cleanBase64 = imgBase64.replace(/^data:[^;]+;base64,/, '').trim();
-
-  // Sniff actual image format from base64 magic bytes
-  // JPEG FF D8 → "/9j", PNG 89504E47 → "iVBORw", GIF 474946 → "R0lGOD"
-  let mediaType = 'image/jpeg'; // XYZ Vending always sends JPEG captchas
-  if (cleanBase64.startsWith('iVBORw'))      mediaType = 'image/png';
-  else if (cleanBase64.startsWith('R0lGOD')) mediaType = 'image/gif';
-  console.log(`   Sniffed: ${mediaType} (prefix="${cleanBase64.substring(0, 6)}")`);
-
-  // Solve IMMEDIATELY after fetch to beat TTL
-  const fetchedAt = Date.now();
-  console.log(`🤖 Solving with Claude Haiku...`);
-
-  const anthropicRes = await request(
-    'https://api.anthropic.com/v1/messages',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         CONFIG.anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-    },
-    {
-      model:      'claude-haiku-4-5-20251001',
-      max_tokens: 16,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type:   'image',
-            source: { type: 'base64', media_type: mediaType, data: cleanBase64 },
-          },
-          {
-            type: 'text',
-            text: 'Read the CAPTCHA digits/letters and reply with ONLY those characters. No spaces, no explanation, no punctuation.',
-          },
-        ],
-      }],
-    }
-  );
-
-  const elapsed     = Date.now() - fetchedAt;
-  const captchaCode = (anthropicRes.body?.content?.[0]?.text || '').trim().replace(/\s+/g, '');
-  console.log(`✅ Solved: "${captchaCode}" (${elapsed}ms)`);
-
-  if (!captchaCode) {
-    throw new Error(`Claude could not read captcha. Response: ${JSON.stringify(anthropicRes.body)}`);
-  }
-
-  return { code: captchaCode, uuid, fetchedAt };
-}
-
-// ── JWT Refresh ────────────────────────────────────────────────────────────────────────────────
-/**
- * Re-login: fetch captcha → solve → POST /api/login immediately.
- * Prints NEW_TOKEN:<token> for GH Actions to capture + update secret.
- * Retries up to maxAttempts with a brand-new captcha each time.
- */
-async function refreshToken(maxAttempts = 3) {
-  if (!CONFIG.username || !CONFIG.password) {
-    throw new Error('XYZ_USERNAME / XYZ_PASSWORD secrets not set. Cannot auto-refresh JWT.');
-  }
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`\n🔄 Token refresh attempt ${attempt}/${maxAttempts}...`);
-    try {
-      const { code: captchaCode, uuid, fetchedAt } = await solveCaptcha();
-      console.log(`   Captcha age at login POST: ${Date.now() - fetchedAt}ms`);
-
-      // POST login immediately — no sleep, beat the TTL
-      const loginRes = await request(
-        `${CONFIG.baseUrl}/api/login`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json;charset=UTF-8',
-            'User-Agent':   'Mozilla/5.0',
-            'Accept':       'application/json, text/plain, */*',
-            'Origin':       CONFIG.baseUrl,
-            'Referer':      `${CONFIG.baseUrl}/login`,
-          },
-        },
-        {
-          username: CONFIG.username,
-          password: CONFIG.password,
-          code:     captchaCode,
-          uuid,
-        }
-      );
-
-      console.log('Login status:', loginRes.status);
-      console.log('Login body:',   JSON.stringify(loginRes.body));
-
-      const newToken =
-        loginRes.body?.token            ||
-        loginRes.body?.data?.token      ||
-        loginRes.body?.data?.adminToken ||
-        null;
-
-      if (!newToken) {
-        const msg = loginRes.body?.msg || loginRes.body?.message || JSON.stringify(loginRes.body);
-        console.warn(`⚠️  Attempt ${attempt} failed: ${msg}`);
-        if (attempt < maxAttempts) {
-          await sleep(500); // minimal pause before retrying with fresh captcha
-          continue;
-        }
-        throw new Error(`Re-login failed after ${maxAttempts} attempts. Last: ${msg}`);
-      }
-
-      CONFIG.token = newToken;
-      console.log('✅ Re-login successful!');
-      console.log(`NEW_TOKEN:${newToken}`);
-      return newToken;
-
-    } catch (err) {
-      if (attempt >= maxAttempts) throw err;
-      console.warn(`⚠️  Attempt ${attempt} threw: ${err.message} — retrying...`);
-      await sleep(500);
-    }
-  }
 }
 
 
