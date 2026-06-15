@@ -37,11 +37,8 @@ jobs:
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_TOKEN:         ${{ secrets.XYZ_TOKEN }}
-          XYZ_FUN_ID:        ${{ secrets.XYZ_FUN_ID }}
-          XYZ_USERNAME:      ${{ secrets.XYZ_USERNAME }}
-          XYZ_PASSWORD:      ${{ secrets.XYZ_PASSWORD }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XYZ_TOKEN:  ${{ secrets.XYZ_TOKEN }}
+          XYZ_FUN_ID: ${{ secrets.XYZ_FUN_ID }}
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
@@ -68,15 +65,6 @@ jobs:
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING)"
 
           exit $EXIT_CODE
-
-      - name: Update XYZ_TOKEN secret if refreshed
-        if: steps.generate.outputs.new_token != ''
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          echo "🔑 New token detected — updating XYZ_TOKEN secret..."
-          echo "${{ steps.generate.outputs.new_token }}" | gh secret set XYZ_TOKEN --repo ${{ github.repository }}
-          echo "✅ XYZ_TOKEN secret updated successfully."
 
       - name: Send pickup code to customer
         if: success() && steps.generate.outputs.pick_code != ''
