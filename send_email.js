@@ -186,29 +186,36 @@ function buildMimeMessage({ subject, html, text }) {
   const from     = `CovaMarket <${CONFIG.gmailUser}>`;
   const to       = CONFIG.toEmail;
 
-  const mime = [
+  // Encode subject for UTF-8 support
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
+
+  // Use base64 encoding for HTML body (handles large content like embedded QR images)
+  const htmlB64 = Buffer.from(html, 'utf8').toString('base64')
+    .match(/.{1,76}/g).join('\r\n');
+
+  const lines = [
     `From: ${from}`,
     `To: ${to}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodedSubject}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     ``,
     `--${boundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    text,
+    Buffer.from(text, 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n'),
     ``,
     `--${boundary}`,
     `Content-Type: text/html; charset=UTF-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    html,
+    htmlB64,
     ``,
     `--${boundary}--`,
-  ].join('\r\n');
+  ];
 
-  return mime;
+  return lines.join('\r\n');
 }
 
 function smtpConversation(socket, mime) {
