@@ -54,11 +54,19 @@ jobs:
           echo "📋 Current active_lockers.json:"
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(file does not exist yet)"
 
+      - name: Resolve order file path
+        id: order_file
+        run: |
+          FILE=$(ls orders/orders_*.json 2>/dev/null | sort | head -1)
+          if [ -z "$FILE" ]; then echo "❌ No order file found in orders/"; exit 1; fi
+          echo "path=$FILE" >> $GITHUB_OUTPUT
+          echo "📋 Using order file: $FILE"
+
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_TOKEN:  ${{ secrets.XYZ_TOKEN }}
-          XYZ_FUN_ID: ${{ secrets.XYZ_FUN_ID }}
+          XYZ_TOKEN:   ${{ secrets.XYZ_TOKEN }}
+          ORDERS_FILE: ${{ steps.order_file.outputs.path }}
         run: |
           set +e
           OUTPUT=$(node generate_pickup_code.js 2>&1)
@@ -68,11 +76,25 @@ jobs:
           echo "────────────────────────"
 
           JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
-          PICK_CODE=$(echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('pickCode',''))" 2>/dev/null || echo "")
-          LOCKER=$(echo "$JSON"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('locker',''))"   2>/dev/null || echo "")
+          extract() { echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))" 2>/dev/null || echo ""; }
 
-          echo "pick_code=$PICK_CODE" >> $GITHUB_OUTPUT
-          echo "locker=$LOCKER"       >> $GITHUB_OUTPUT
+          PICK_CODE=$(extract pickCode)
+          LOCKER=$(extract locker)
+          CUSTOMER_NAME=$(extract customerName)
+          CUSTOMER_EMAIL=$(extract customerEmail)
+          ORDER_ID=$(extract orderId)
+          ORDER_LOCATION=$(extract orderLocation)
+          PICKUP_DATE=$(extract pickupDate)
+          PICKUP_TIME=$(extract pickupTime)
+
+          echo "pick_code=$PICK_CODE"         >> $GITHUB_OUTPUT
+          echo "locker=$LOCKER"               >> $GITHUB_OUTPUT
+          echo "customer_name=$CUSTOMER_NAME" >> $GITHUB_OUTPUT
+          echo "customer_email=$CUSTOMER_EMAIL" >> $GITHUB_OUTPUT
+          echo "order_id=$ORDER_ID"           >> $GITHUB_OUTPUT
+          echo "order_location=$ORDER_LOCATION" >> $GITHUB_OUTPUT
+          echo "pickup_date=$PICKUP_DATE"     >> $GITHUB_OUTPUT
+          echo "pickup_time=$PICKUP_TIME"     >> $GITHUB_OUTPUT
 
           mkdir -p pickup_codes
           echo "$JSON" > pickup_codes/latest.json
@@ -87,14 +109,14 @@ jobs:
         env:
           GMAIL_USER:      covamarketplace@gmail.com
           GMAIL_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
-          TO_EMAIL:        ${{ github.event.inputs.customer_email || 'alejandra.evander92@gmail.com' }}
-          CUSTOMER_NAME:   ${{ github.event.inputs.customer_name  || 'Valued Customer' }}
-          ORDER_ID:        ${{ github.event.inputs.order_id       || 'test-order' }}
+          TO_EMAIL:        ${{ steps.generate.outputs.customer_email }}
+          CUSTOMER_NAME:   ${{ steps.generate.outputs.customer_name }}
+          ORDER_ID:        ${{ steps.generate.outputs.order_id }}
           PICK_CODE:       ${{ steps.generate.outputs.pick_code }}
           LOCKER:          ${{ steps.generate.outputs.locker }}
-          PICKUP_LOCATION: ${{ github.event.inputs.pickup_location || 'CovaMarket Locker' }}
-          PICKUP_DATE:     ${{ github.event.inputs.pickup_date     || 'N/A' }}
-          PICKUP_TIME:     ${{ github.event.inputs.pickup_time     || 'N/A' }}
+          PICKUP_LOCATION: ${{ steps.generate.outputs.order_location }}
+          PICKUP_DATE:     ${{ steps.generate.outputs.pickup_date }}
+          PICKUP_TIME:     ${{ steps.generate.outputs.pickup_time }}
         run: |
           echo "📧 Sending pickup code email..."
           node send_email.js
@@ -111,6 +133,6 @@ jobs:
           git status
 
           git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
-            git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ github.event.inputs.order_id }})"
+            git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ steps.generate.outputs.order_id }})"
 
           git push origin main
