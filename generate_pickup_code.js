@@ -29,10 +29,31 @@ const http   = require('http');
 const fs     = require('fs');
 const path   = require('path');
 
+// ── Location → funId mapping ──────────────────────────────────────────────────
+// Each physical locker machine has its own funId.
+// Add new locations here as you expand to more sites.
+const LOCATION_FUN_MAP = {
+  'lrt lembah subang': 716,
+  'lrt pantai':        715,
+};
+
+function resolveFunId(orderLocation) {
+  if (!orderLocation) throw new Error('order_location is missing in order JSON');
+  const key = orderLocation.trim().toLowerCase();
+  for (const [loc, funId] of Object.entries(LOCATION_FUN_MAP)) {
+    if (key === loc) return funId;
+  }
+  throw new Error(
+    `Unknown order_location: "${orderLocation}".\n` +
+    `Known locations: ${Object.keys(LOCATION_FUN_MAP).map(l => `"${l}"`).join(', ')}\n` +
+    `Add it to LOCATION_FUN_MAP in generate_pickup_code.js`
+  );
+}
+
 const CONFIG = {
   baseUrl:        'https://xzyvend.com',
-  token:          process.env.XYZ_TOKEN        || '',
-  funId:          parseInt(process.env.XYZ_FUN_ID || '716'),
+  token:          process.env.XYZ_TOKEN || '',
+  funId:          null,   // resolved from order_location at runtime
   generateNum:    1,
   pickType:       0,
   trackingFile:   path.join(__dirname, 'pickup_codes', 'active_lockers.json'),
@@ -406,7 +427,23 @@ async function main() {
   try {
     if (!CONFIG.token) throw new Error('XYZ_TOKEN secret is not set!');
     console.log('🔑 Using stored JWT token');
-    console.log(`📦 funId=${CONFIG.funId}\n`);
+
+    // ── Load order from file ──────────────────────────────────────────────────
+    const orderPath = process.env.ORDERS_FILE || process.argv[2];
+    if (!orderPath) throw new Error('Provide order file via ORDERS_FILE env var or as CLI argument');
+
+    const orders = JSON.parse(fs.readFileSync(orderPath, 'utf8'));
+    if (!orders.length) throw new Error(`No orders found in ${orderPath}`);
+    const order = orders[0];
+
+    console.log(`📋 Order     : ${order.order_id}`);
+    console.log(`👤 Customer  : ${order.customer_name} <${order.email}>`);
+    console.log(`📍 Location  : ${order.order_location}`);
+    console.log(`🗓  Pickup    : ${order.pickup_date} ${order.pickup_time}`);
+
+    // ── Resolve funId from order_location ────────────────────────────────────
+    CONFIG.funId = resolveFunId(order.order_location);
+    console.log(`\n📦 funId=${CONFIG.funId} (resolved from "${order.order_location}")\n`);
 
     // ── Fetch channels first, then pick records (sequential to avoid double-refresh race)
     console.log('🔍 Fetching channels...');
@@ -490,14 +527,21 @@ async function main() {
     console.log('═══════════════════════════════════\n');
 
     console.log('OUTPUT_JSON:' + JSON.stringify({
-      success: true,
+      success:       true,
       pickCode,
       orderNo,
-      locker:      locker.lockerLabel,
-      funId:       CONFIG.funId,
-      goodsId:     locker.goodsId,
-      roadId:      locker.roadId,
-      generatedAt: new Date().toISOString(),
+      locker:        locker.lockerLabel,
+      funId:         CONFIG.funId,
+      goodsId:       locker.goodsId,
+      roadId:        locker.roadId,
+      generatedAt:   new Date().toISOString(),
+      // Order details (passed through for email/workflow steps)
+      orderId:       order.order_id,
+      customerName:  order.customer_name,
+      customerEmail: order.email,
+      orderLocation: order.order_location,
+      pickupDate:    order.pickup_date,
+      pickupTime:    order.pickup_time,
     }));
 
   } catch (err) {
