@@ -385,6 +385,36 @@ async function replenishRoads(roadIds) {
   return res.body;
 }
 
+// ── Auto-replenish empty channels ────────────────────────────────────────────
+/**
+ * Find all channels with stock=0 that have no pending code, and replenish them.
+ * This ensures lockers are always ready — handles both:
+ *   1. Channels that were never stocked (LRTPantai fresh setup)
+ *   2. Channels emptied after pickup but stale tracker already cleaned
+ */
+async function replenishEmptyChannels(channels, pendingLockerNames) {
+  const emptyRoadIds = channels
+    .filter(ch => {
+      const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+      const goodsName = ch.goodsName || ch.commodityName || `Locker ${ch.roadRow}-${ch.roadColumn}`;
+      const hasPending = pendingLockerNames.has(goodsName);
+      // Only replenish empty channels that don't already have a pending pickup code
+      return stock === 0 && !hasPending;
+    })
+    .map(ch => ch.roadId);
+
+  if (!emptyRoadIds.length) {
+    console.log('✅ All channels have stock — no auto-replenishment needed.');
+    return;
+  }
+
+  console.log(`🔄 Auto-replenishing ${emptyRoadIds.length} empty channel(s): [${emptyRoadIds.join(', ')}]`);
+  await replenishRoads(emptyRoadIds);
+
+  // Small wait for the API to update stock before we proceed
+  await sleep(2000);
+}
+
 // ── Poll for new code ─────────────────────────────────────────────────────────
 async function waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes, { maxAttempts = 15, delayMs = 5000 } = {}) {
   console.log(`\n⏳ Polling for new code on "${locker.goodsName}" roadId=${locker.roadId} (up to ${maxAttempts * delayMs / 1000}s)...`);
@@ -478,118 +508,146 @@ async function main() {
 
     const orders = JSON.parse(fs.readFileSync(orderPath, 'utf8'));
     if (!orders.length) throw new Error(`No orders found in ${orderPath}`);
-    const order = orders[0];
 
-    console.log(`📋 Order     : ${order.order_id}`);
-    console.log(`👤 Customer  : ${order.customer_name} <${order.email}>`);
-    console.log(`📍 Location  : ${order.order_location}`);
-    console.log(`🗓  Pickup    : ${order.pickup_date} ${order.pickup_time}`);
+    console.log(`\n📦 Found ${orders.length} order(s) to process\n`);
 
-    // ── Resolve funId from order_location ────────────────────────────────────
-    CONFIG.funId = resolveFunId(order.order_location);
-    console.log(`\n📦 funId=${CONFIG.funId} (resolved from "${order.order_location}")\n`);
+    // ── Process each order ────────────────────────────────────────────────────
+    for (let i = 0; i < orders.length; i++) {
+      const order = orders[i];
+      console.log(`\n${'═'.repeat(50)}`);
+      console.log(`📦 Processing order ${i + 1}/${orders.length}`);
+      console.log(`📋 Order     : ${order.order_id}`);
+      console.log(`👤 Customer  : ${order.customer_name} <${order.email}>`);
+      console.log(`📍 Location  : ${order.order_location}`);
+      console.log(`🗓  Pickup    : ${order.pickup_date} ${order.pickup_time}`);
 
-    // ── Fetch channels first, then pick records (sequential to avoid double-refresh race)
-    console.log('🔍 Fetching channels...');
-    const channels = await getAllChannels();
+      try {
+        // ── Resolve funId from order_location ──────────────────────────────────
+        CONFIG.funId = resolveFunId(order.order_location);
+        console.log(`\n📦 funId=${CONFIG.funId} (resolved from "${order.order_location}")\n`);
 
-    console.log('🔍 Fetching ALL pick records (client-side pending filter)...');
-    const allRecords = await fetchAllRecords();
+        // ── Fetch channels + records fresh per order (different funId per location)
+        console.log('🔍 Fetching channels...');
+        const channels = await getAllChannels();
 
-    // ── Guard: if channels empty, likely a token issue ────────────────────────
-    if (!channels.length) {
-      console.warn('⚠️  Got 0 channels — token may have expired. Attempting refresh...');
-      await refreshToken();
-      // Retry channels fetch after refresh
-      const retried = await getAllChannels();
-      if (!retried.length) {
-        throw new Error('Still got 0 channels after token refresh. Check funId or account access.');
+        console.log('🔍 Fetching ALL pick records...');
+        const allRecords = await fetchAllRecords();
+
+        // ── Guard: if channels empty, likely a token issue ──────────────────────
+        if (!channels.length) {
+          console.warn('⚠️  Got 0 channels — token may have expired. Attempting refresh...');
+          await refreshToken();
+          const retried = await getAllChannels();
+          if (!retried.length) {
+            throw new Error('Still got 0 channels after token refresh. Check funId or account access.');
+          }
+          channels.push(...retried);
+        }
+
+        // ── Pending locker names ────────────────────────────────────────────────
+        const pendingLockerNames = await getPendingLockerNames(allRecords);
+
+        // ── Clean stale tracker entries ─────────────────────────────────────────
+        const cleanedActiveLockers = await cleanStaleTrackerEntries(allRecords);
+
+        // ── Auto-replenish any empty channels (no pending code, stock=0) ────────
+        await replenishEmptyChannels(channels, pendingLockerNames);
+
+        // ── Re-fetch channels after replenishment so stock values are fresh ─────
+        const freshChannels = await getAllChannels();
+
+        // ── Find free locker ────────────────────────────────────────────────────
+        const locker = await findFreeLocker(freshChannels, pendingLockerNames, cleanedActiveLockers);
+
+        // ── Snapshot BEFORE ─────────────────────────────────────────────────────
+        const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker);
+
+        // ── Create pickup code ──────────────────────────────────────────────────
+        const result = await addPickInfo(locker);
+        if (result?.code !== '00000') {
+          throw new Error(`addPickInfo failed: ${JSON.stringify(result)}`);
+        }
+
+        // ── Try direct response first ───────────────────────────────────────────
+        let pickCode = result?.data?.pickCode
+          || (Array.isArray(result?.data) && result.data[0]?.pickCode)
+          || result?.pickCode
+          || null;
+        let orderNo  = result?.data?.pickOrderNum
+          || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
+          || null;
+
+        if (pickCode) {
+          console.log(`✅ pickCode in response: ${pickCode}`);
+        } else {
+          const newRec = await waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes);
+          if (newRec) {
+            pickCode = newRec.pickCode;
+            orderNo  = newRec.pickOrderNum;
+          }
+        }
+
+        if (!pickCode) {
+          throw new Error(
+            `addPickInfo returned success but pick code not found after 75s of targeted polling.\n` +
+            `Code WAS created server-side — check the UI for locker ${locker.lockerName}.\n` +
+            `Response: ${JSON.stringify(result)}`
+          );
+        }
+
+        // ── Save ────────────────────────────────────────────────────────────────
+        const activeLockers = loadActiveLockers();
+        activeLockers[locker.roadId] = {
+          pickCode,
+          orderNo:   orderNo || null,
+          locker:    locker.lockerLabel,
+          goodsId:   locker.goodsId,
+          createdAt: new Date().toISOString(),
+        };
+        saveActiveLockers(activeLockers);
+
+        console.log('\n═══════════════════════════════════');
+        console.log(`✅ PICKUP CODE : ${pickCode}`);
+        console.log(`📋 ORDER NO   : ${orderNo || 'N/A'}`);
+        console.log(`📦 LOCKER     : ${locker.lockerLabel} (roadId=${locker.roadId})`);
+        console.log('═══════════════════════════════════\n');
+
+        console.log('OUTPUT_JSON:' + JSON.stringify({
+          success:       true,
+          pickCode,
+          orderNo,
+          locker:        locker.lockerLabel,
+          funId:         CONFIG.funId,
+          goodsId:       locker.goodsId,
+          roadId:        locker.roadId,
+          generatedAt:   new Date().toISOString(),
+          orderId:       order.order_id,
+          customerName:  order.customer_name,
+          customerEmail: order.email,
+          orderLocation: order.order_location,
+          pickupDate:    order.pickup_date,
+          pickupTime:    order.pickup_time,
+        }));
+
+      } catch (err) {
+        // Log failure for this order but continue processing remaining orders
+        console.error(`❌ Error on order ${order.order_id}: ${err.message}`);
+        console.log('OUTPUT_JSON:' + JSON.stringify({
+          success:  false,
+          orderId:  order.order_id,
+          error:    err.message,
+        }));
       }
-      channels.push(...retried);
-    }
 
-    // ── Pending locker names ──────────────────────────────────────────────────
-    const pendingLockerNames = await getPendingLockerNames(allRecords);
-
-    // ── Clean stale tracker entries ───────────────────────────────────────────
-    const cleanedActiveLockers = await cleanStaleTrackerEntries(allRecords);
-
-    // ── Find free locker ──────────────────────────────────────────────────────
-    const locker = await findFreeLocker(channels, pendingLockerNames, cleanedActiveLockers);
-
-    // ── Snapshot BEFORE ───────────────────────────────────────────────────────
-    const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker);
-
-    // ── Create pickup code ────────────────────────────────────────────────────
-    const result = await addPickInfo(locker);
-    if (result?.code !== '00000') {
-      throw new Error(`addPickInfo failed: ${JSON.stringify(result)}`);
-    }
-
-    // ── Try direct response first ─────────────────────────────────────────────
-    let pickCode = result?.data?.pickCode
-      || (Array.isArray(result?.data) && result.data[0]?.pickCode)
-      || result?.pickCode
-      || null;
-    let orderNo  = result?.data?.pickOrderNum
-      || (Array.isArray(result?.data) && result.data[0]?.pickOrderNum)
-      || null;
-
-    if (pickCode) {
-      console.log(`✅ pickCode in response: ${pickCode}`);
-    } else {
-      const newRec = await waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes);
-      if (newRec) {
-        pickCode = newRec.pickCode;
-        orderNo  = newRec.pickOrderNum;
+      // Small delay between orders to avoid hammering the API
+      if (i < orders.length - 1) {
+        console.log('\n⏸  Waiting 3s before next order...');
+        await sleep(3000);
       }
     }
-
-    if (!pickCode) {
-      throw new Error(
-        `addPickInfo returned success but pick code not found after 75s of targeted polling.\n` +
-        `Code WAS created server-side — check the UI for locker ${locker.lockerName}.\n` +
-        `Response: ${JSON.stringify(result)}`
-      );
-    }
-
-    // ── Save ──────────────────────────────────────────────────────────────────
-    const activeLockers = loadActiveLockers();
-    activeLockers[locker.roadId] = {
-      pickCode,
-      orderNo:   orderNo || null,
-      locker:    locker.lockerLabel,
-      goodsId:   locker.goodsId,
-      createdAt: new Date().toISOString(),
-    };
-    saveActiveLockers(activeLockers);
-
-    console.log('\n═══════════════════════════════════');
-    console.log(`✅ PICKUP CODE : ${pickCode}`);
-    console.log(`📋 ORDER NO   : ${orderNo || 'N/A'}`);
-    console.log(`📦 LOCKER     : ${locker.lockerLabel} (roadId=${locker.roadId})`);
-    console.log('═══════════════════════════════════\n');
-
-    console.log('OUTPUT_JSON:' + JSON.stringify({
-      success:       true,
-      pickCode,
-      orderNo,
-      locker:        locker.lockerLabel,
-      funId:         CONFIG.funId,
-      goodsId:       locker.goodsId,
-      roadId:        locker.roadId,
-      generatedAt:   new Date().toISOString(),
-      // Order details (passed through for email/workflow steps)
-      orderId:       order.order_id,
-      customerName:  order.customer_name,
-      customerEmail: order.email,
-      orderLocation: order.order_location,
-      pickupDate:    order.pickup_date,
-      pickupTime:    order.pickup_time,
-    }));
 
   } catch (err) {
-    console.error('❌ Error:', err.message);
+    console.error('❌ Fatal error:', err.message);
     console.log('OUTPUT_JSON:' + JSON.stringify({ success: false, error: err.message }));
     process.exit(1);
   }
