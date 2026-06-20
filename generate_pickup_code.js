@@ -369,19 +369,34 @@ async function addPickInfo(locker) {
  */
 async function replenishRoads(roadIds) {
   if (!roadIds || !roadIds.length) return;
-  const payload = roadIds.join(',');
-  console.log(`🔄 Replenishing roadIds: ${payload}`);
-  // Payload is a plain comma-separated string of roadIds (confirmed from DevTools)
-  const headers = authHeaders();
-  headers['Content-Type'] = 'text/plain;charset=UTF-8';
+  // Try both formats — API may expect JSON array or plain comma string
+  // From DevTools: payload was "96351,96353,..." — but AC0001 means param error
+  // Try JSON array format: [96351, 96353, ...]
+  const payload = roadIds.map(Number);
+  console.log(`🔄 Replenishing roadIds: ${payload.join(',')}`);
   const res = await withAutoRefresh(() =>
     request(
       `${CONFIG.baseUrl}/api/roadInfo/replenishRoad`,
-      { method: 'POST', headers },
+      { method: 'POST', headers: authHeaders('application/json;charset=UTF-8') },
       payload
     )
   );
   console.log(`   replenishRoad status: ${res.status} | response: ${JSON.stringify(res.body)}`);
+  if (res.body?.code !== '00000') {
+    // Fallback: try as comma-separated plain string
+    console.log('   Retrying with plain text format...');
+    const headers2 = authHeaders();
+    headers2['Content-Type'] = 'text/plain;charset=UTF-8';
+    const res2 = await withAutoRefresh(() =>
+      request(
+        `${CONFIG.baseUrl}/api/roadInfo/replenishRoad`,
+        { method: 'POST', headers: headers2 },
+        roadIds.join(',')
+      )
+    );
+    console.log(`   replenishRoad retry status: ${res2.status} | response: ${JSON.stringify(res2.body)}`);
+    return res2.body;
+  }
   return res.body;
 }
 
@@ -527,7 +542,7 @@ async function main() {
         console.log(`\n📦 funId=${CONFIG.funId} (resolved from "${order.order_location}")\n`);
 
         // ── Fetch channels + records fresh per order (different funId per location)
-        console.log('🔍 Fetching channels...');
+        console.log(`🔍 Fetching channels for funId=${CONFIG.funId}...`);
         const channels = await getAllChannels();
 
         console.log('🔍 Fetching ALL pick records...');
