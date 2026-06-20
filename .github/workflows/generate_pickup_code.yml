@@ -44,60 +44,46 @@ jobs:
           ORDERS_FILE: ${{ steps.order_file.outputs.path }}
         run: |
           set +e
-          OUTPUT=$(node generate_pickup_code.js 2>&1)
-          EXIT_CODE=$?
-          echo "──────── Output ────────"
-          echo "$OUTPUT"
+          node generate_pickup_code.js 2>&1 | tee /tmp/node_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
           echo "────────────────────────"
 
-          # Extract all OUTPUT_JSON lines (one per order)
-          JSONS=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
-          ORDER_COUNT=$(echo "$JSONS" | grep -c "success" || echo "0")
-          echo "📦 Orders processed: $ORDER_COUNT"
+          # Extract OUTPUT_JSON lines to temp file
+          grep "OUTPUT_JSON:" /tmp/node_output.txt | sed 's/OUTPUT_JSON://' > /tmp/jsons.txt
+          echo "📦 JSON lines found: $(wc -l < /tmp/jsons.txt)"
 
-          # Write a helper python script to parse results
-          cat > /tmp/parse_orders.py << 'PYEOF'
-import sys, json
-
-lines = [l.strip() for l in sys.stdin if l.strip()]
-results = []
-first_code = ""
-
-for l in lines:
-    try:
-        d = json.loads(l)
-        if d.get('success'):
-            results.append(d)
-            if not first_code:
-                first_code = d.get('pickCode', '')
-    except:
-        pass
-
-# Write success orders JSON to file
-with open('/tmp/success_orders.json', 'w') as f:
-    json.dump(results, f)
-
-# Write first pick code to file
-with open('/tmp/first_pick_code.txt', 'w') as f:
-    f.write(first_code)
-
-print(f"Parsed {len(results)} successful order(s), first code: {first_code}")
-PYEOF
-
-          echo "$JSONS" | python3 /tmp/parse_orders.py
+          # Use node to parse results (avoids Python-in-YAML indentation issues)
+          node -e "
+            const fs = require('fs');
+            const lines = fs.readFileSync('/tmp/jsons.txt','utf8').trim().split('\n').filter(Boolean);
+            const results = [];
+            let firstCode = '';
+            for (const l of lines) {
+              try {
+                const d = JSON.parse(l);
+                if (d.success) {
+                  results.push(d);
+                  if (!firstCode) firstCode = d.pickCode || '';
+                }
+              } catch(e) {}
+            }
+            fs.writeFileSync('/tmp/success_orders.json', JSON.stringify(results));
+            fs.writeFileSync('/tmp/first_pick_code.txt', firstCode);
+            console.log('Parsed ' + results.length + ' successful order(s), first code: ' + firstCode);
+          "
 
           FIRST=$(cat /tmp/first_pick_code.txt 2>/dev/null || echo "")
           echo "pick_code=$FIRST" >> $GITHUB_OUTPUT
           echo "📋 First pick code: $FIRST"
 
-          # Use multiline delimiter for success_orders to handle JSON safely
-          SUCCESS_JSON=$(cat /tmp/success_orders.json 2>/dev/null || echo "[]")
+          # Multiline delimiter for JSON output
           echo "success_orders<<EOF_ORDERS" >> $GITHUB_OUTPUT
-          echo "$SUCCESS_JSON" >> $GITHUB_OUTPUT
+          cat /tmp/success_orders.json >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
           echo "EOF_ORDERS" >> $GITHUB_OUTPUT
 
           mkdir -p pickup_codes
-          cp /tmp/success_orders.json pickup_codes/latest.json
+          cp /tmp/success_orders.json pickup_codes/latest.json 2>/dev/null || echo "[]" > pickup_codes/latest.json
 
           echo "📋 active_lockers.json after script ran:"
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING)"
@@ -112,24 +98,27 @@ PYEOF
           SUCCESS_ORDERS: ${{ steps.generate.outputs.success_orders }}
         run: |
           echo "📧 Sending pickup code emails..."
-          echo "$SUCCESS_ORDERS" | python3 -c "
-import sys, json, os, subprocess
-orders = json.loads(sys.stdin.read())
-print(f'Sending {len(orders)} email(s)...')
-for o in orders:
-    env = {**os.environ,
-        'TO_EMAIL':        o.get('customerEmail',''),
-        'CUSTOMER_NAME':   o.get('customerName',''),
-        'ORDER_ID':        o.get('orderId',''),
-        'PICK_CODE':       o.get('pickCode',''),
-        'LOCKER':          o.get('locker',''),
-        'PICKUP_LOCATION': o.get('orderLocation',''),
-        'PICKUP_DATE':     o.get('pickupDate',''),
-        'PICKUP_TIME':     o.get('pickupTime',''),
-    }
-    print(f"  → Sending to {o.get('customerEmail')} for order {o.get('orderId')}")
-    subprocess.run(['node', 'send_email.js'], env=env, check=True)
-  " 
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
+            console.log('Sending ' + orders.length + ' email(s)...');
+            for (const o of orders) {
+              const env = {
+                ...process.env,
+                TO_EMAIL:        o.customerEmail || '',
+                CUSTOMER_NAME:   o.customerName  || '',
+                ORDER_ID:        o.orderId        || '',
+                PICK_CODE:       o.pickCode       || '',
+                LOCKER:          o.locker         || '',
+                PICKUP_LOCATION: o.orderLocation  || '',
+                PICKUP_DATE:     o.pickupDate     || '',
+                PICKUP_TIME:     o.pickupTime     || '',
+              };
+              console.log('  Sending to ' + o.customerEmail + ' for order ' + o.orderId);
+              execSync('node send_email.js', { env, stdio: 'inherit' });
+            }
+          " 
 
       - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
