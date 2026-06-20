@@ -50,51 +50,86 @@ jobs:
           echo "$OUTPUT"
           echo "────────────────────────"
 
-          JSON=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
-          extract() { echo "$JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$1',''))" 2>/dev/null || echo ""; }
+          # Extract all OUTPUT_JSON lines (one per order)
+          JSONS=$(echo "$OUTPUT" | grep "OUTPUT_JSON:" | sed 's/OUTPUT_JSON://')
+          ORDER_COUNT=$(echo "$JSONS" | grep -c "success" || echo "0")
+          echo "📦 Orders processed: $ORDER_COUNT"
 
-          PICK_CODE=$(extract pickCode)
-          LOCKER=$(extract locker)
-          CUSTOMER_NAME=$(extract customerName)
-          CUSTOMER_EMAIL=$(extract customerEmail)
-          ORDER_ID=$(extract orderId)
-          ORDER_LOCATION=$(extract orderLocation)
-          PICKUP_DATE=$(extract pickupDate)
-          PICKUP_TIME=$(extract pickupTime)
+          # Write a helper python script to parse results
+          cat > /tmp/parse_orders.py << 'PYEOF'
+import sys, json
 
-          echo "pick_code=$PICK_CODE"         >> $GITHUB_OUTPUT
-          echo "locker=$LOCKER"               >> $GITHUB_OUTPUT
-          echo "customer_name=$CUSTOMER_NAME" >> $GITHUB_OUTPUT
-          echo "customer_email=$CUSTOMER_EMAIL" >> $GITHUB_OUTPUT
-          echo "order_id=$ORDER_ID"           >> $GITHUB_OUTPUT
-          echo "order_location=$ORDER_LOCATION" >> $GITHUB_OUTPUT
-          echo "pickup_date=$PICKUP_DATE"     >> $GITHUB_OUTPUT
-          echo "pickup_time=$PICKUP_TIME"     >> $GITHUB_OUTPUT
+lines = [l.strip() for l in sys.stdin if l.strip()]
+results = []
+first_code = ""
+
+for l in lines:
+    try:
+        d = json.loads(l)
+        if d.get('success'):
+            results.append(d)
+            if not first_code:
+                first_code = d.get('pickCode', '')
+    except:
+        pass
+
+# Write success orders JSON to file
+with open('/tmp/success_orders.json', 'w') as f:
+    json.dump(results, f)
+
+# Write first pick code to file
+with open('/tmp/first_pick_code.txt', 'w') as f:
+    f.write(first_code)
+
+print(f"Parsed {len(results)} successful order(s), first code: {first_code}")
+PYEOF
+
+          echo "$JSONS" | python3 /tmp/parse_orders.py
+
+          FIRST=$(cat /tmp/first_pick_code.txt 2>/dev/null || echo "")
+          echo "pick_code=$FIRST" >> $GITHUB_OUTPUT
+          echo "📋 First pick code: $FIRST"
+
+          # Use multiline delimiter for success_orders to handle JSON safely
+          SUCCESS_JSON=$(cat /tmp/success_orders.json 2>/dev/null || echo "[]")
+          echo "success_orders<<EOF_ORDERS" >> $GITHUB_OUTPUT
+          echo "$SUCCESS_JSON" >> $GITHUB_OUTPUT
+          echo "EOF_ORDERS" >> $GITHUB_OUTPUT
 
           mkdir -p pickup_codes
-          echo "$JSON" > pickup_codes/latest.json
+          cp /tmp/success_orders.json pickup_codes/latest.json
 
           echo "📋 active_lockers.json after script ran:"
           cat pickup_codes/active_lockers.json 2>/dev/null || echo "(MISSING)"
 
           exit $EXIT_CODE
 
-      - name: Send pickup code email to customer
+      - name: Send pickup code emails to customers
         if: success() && steps.generate.outputs.pick_code != ''
         env:
-          GMAIL_USER:      covamarketplace@gmail.com
-          GMAIL_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
-          TO_EMAIL:        ${{ steps.generate.outputs.customer_email }}
-          CUSTOMER_NAME:   ${{ steps.generate.outputs.customer_name }}
-          ORDER_ID:        ${{ steps.generate.outputs.order_id }}
-          PICK_CODE:       ${{ steps.generate.outputs.pick_code }}
-          LOCKER:          ${{ steps.generate.outputs.locker }}
-          PICKUP_LOCATION: ${{ steps.generate.outputs.order_location }}
-          PICKUP_DATE:     ${{ steps.generate.outputs.pickup_date }}
-          PICKUP_TIME:     ${{ steps.generate.outputs.pickup_time }}
+          GMAIL_USER:     covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SUCCESS_ORDERS: ${{ steps.generate.outputs.success_orders }}
         run: |
-          echo "📧 Sending pickup code email..."
-          node send_email.js
+          echo "📧 Sending pickup code emails..."
+          echo "$SUCCESS_ORDERS" | python3 -c "
+import sys, json, os, subprocess
+orders = json.loads(sys.stdin.read())
+print(f'Sending {len(orders)} email(s)...')
+for o in orders:
+    env = {**os.environ,
+        'TO_EMAIL':        o.get('customerEmail',''),
+        'CUSTOMER_NAME':   o.get('customerName',''),
+        'ORDER_ID':        o.get('orderId',''),
+        'PICK_CODE':       o.get('pickCode',''),
+        'LOCKER':          o.get('locker',''),
+        'PICKUP_LOCATION': o.get('orderLocation',''),
+        'PICKUP_DATE':     o.get('pickupDate',''),
+        'PICKUP_TIME':     o.get('pickupTime',''),
+    }
+    print(f"  → Sending to {o.get('customerEmail')} for order {o.get('orderId')}")
+    subprocess.run(['node', 'send_email.js'], env=env, check=True)
+  " 
 
       - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
@@ -108,6 +143,7 @@ jobs:
           git status
 
           git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
-            git commit -m "Pickup code ${{ steps.generate.outputs.pick_code }} → locker ${{ steps.generate.outputs.locker }} (order ${{ steps.generate.outputs.order_id }})"
+            ORDERS_STR=$(python3 -c "import json; o=json.load(open('/tmp/success_orders.json')); print(','.join([x.get('orderId','') for x in o]))" 2>/dev/null || echo "orders")
+            git commit -m "Pickup codes generated for orders: $ORDERS_STR"
 
           git push origin main
