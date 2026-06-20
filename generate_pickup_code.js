@@ -369,34 +369,18 @@ async function addPickInfo(locker) {
  */
 async function replenishRoads(roadIds) {
   if (!roadIds || !roadIds.length) return;
-  // Try both formats — API may expect JSON array or plain comma string
-  // From DevTools: payload was "96351,96353,..." — but AC0001 means param error
-  // Try JSON array format: [96351, 96353, ...]
-  const payload = roadIds.map(Number);
-  console.log(`🔄 Replenishing roadIds: ${payload.join(',')}`);
+  // DevTools confirmed: Form Data with field name "roadIds" = application/x-www-form-urlencoded
+  const payload = `roadIds=${roadIds.join(',')}`;
+  console.log(`🔄 Replenishing roadIds: ${roadIds.join(',')}`);
+  const headers = authHeaders('application/x-www-form-urlencoded');
   const res = await withAutoRefresh(() =>
     request(
       `${CONFIG.baseUrl}/api/roadInfo/replenishRoad`,
-      { method: 'POST', headers: authHeaders('application/json;charset=UTF-8') },
+      { method: 'POST', headers },
       payload
     )
   );
   console.log(`   replenishRoad status: ${res.status} | response: ${JSON.stringify(res.body)}`);
-  if (res.body?.code !== '00000') {
-    // Fallback: try as comma-separated plain string
-    console.log('   Retrying with plain text format...');
-    const headers2 = authHeaders();
-    headers2['Content-Type'] = 'text/plain;charset=UTF-8';
-    const res2 = await withAutoRefresh(() =>
-      request(
-        `${CONFIG.baseUrl}/api/roadInfo/replenishRoad`,
-        { method: 'POST', headers: headers2 },
-        roadIds.join(',')
-      )
-    );
-    console.log(`   replenishRoad retry status: ${res2.status} | response: ${JSON.stringify(res2.body)}`);
-    return res2.body;
-  }
   return res.body;
 }
 
