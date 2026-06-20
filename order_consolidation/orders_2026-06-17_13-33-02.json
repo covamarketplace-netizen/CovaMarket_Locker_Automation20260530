@@ -7,12 +7,32 @@
     "pickup_type": "Advance Pickup",
     "pickup_date": "Sun, 21 Jun 2026",
     "pickup_time": "1:00 PM - 7:00 PM"
-  }
+  },
 
-    {
+  {
     "order_id": "#1441",
     "customer_name": "dfd fgdg",
     "email": "jhlee1214@gmail.com",
+    "order_location": "LRT Pantai",
+    "pickup_type": "Advance Pickup",
+    "pickup_date": "Sun, 21 Jun 2026",
+    "pickup_time": "1:00 PM - 7:00 PM"
+  },
+
+  {
+    "order_id": "#1442",
+    "customer_name": "Alej",
+    "email": "alejandra.evander92@gmail.com",
+    "order_location": "LRT Lembah Subang",
+    "pickup_type": "Advance Pickup",
+    "pickup_date": "Sun, 21 Jun 2026",
+    "pickup_time": "1:00 PM - 7:00 PM"
+  },
+
+  {
+    "order_id": "#1443",
+    "customer_name": "Alej",
+    "email": "alejandra.evander92@gmail.com",
     "order_location": "LRT Pantai",
     "pickup_type": "Advance Pickup",
     "pickup_date": "Sun, 21 Jun 2026",
