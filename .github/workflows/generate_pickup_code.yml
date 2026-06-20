@@ -3,33 +3,8 @@ name: Generate XYZ Vending Pickup Code
 on:
   push:
     paths:
-      - 'orders/orders_*.json'
-  workflow_dispatch:
-    inputs:
-      order_id:
-        description: 'Shopify Order ID'
-        required: false
-        default: 'test-order'
-      customer_name:
-        description: 'Customer Name'
-        required: false
-        default: 'Valued Customer'
-      customer_email:
-        description: 'Customer Email'
-        required: false
-        default: 'alejandra.evander92@gmail.com'
-      pickup_location:
-        description: 'Pickup Location'
-        required: false
-        default: 'CovaMarket Locker'
-      pickup_date:
-        description: 'Pickup Date'
-        required: false
-        default: 'N/A'
-      pickup_time:
-        description: 'Pickup Time'
-        required: false
-        default: 'N/A'
+      - 'order_consolidation/orders_*.json'
+  workflow_dispatch:  # no inputs needed — everything comes from the order JSON
 
 jobs:
   generate-pickup-code:
@@ -57,8 +32,8 @@ jobs:
       - name: Resolve order file path
         id: order_file
         run: |
-          FILE=$(ls orders/orders_*.json 2>/dev/null | sort | head -1)
-          if [ -z "$FILE" ]; then echo "❌ No order file found in orders/"; exit 1; fi
+          FILE=$(ls order_consolidation/orders_*.json 2>/dev/null | sort | tail -1)
+          if [ -z "$FILE" ]; then echo "❌ No order file found in order_consolidation/"; exit 1; fi
           echo "path=$FILE" >> $GITHUB_OUTPUT
           echo "📋 Using order file: $FILE"
 
