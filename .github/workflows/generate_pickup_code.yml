@@ -24,6 +24,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install dependencies
+        run: npm install qrcode
+
       - name: Show current active_lockers.json
         run: |
           echo "📋 Current active_lockers.json:"
