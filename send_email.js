@@ -23,6 +23,7 @@
 const https = require('https');
 const tls   = require('tls');
 const net   = require('net');
+const QRCode = require('qrcode');
 
 const CONFIG = {
   gmailUser:     process.env.GMAIL_USER       || 'covamarketplace@gmail.com',
@@ -38,8 +39,15 @@ const CONFIG = {
 };
 
 // ── Build email HTML ──────────────────────────────────────────────────────────
-function buildEmail() {
+async function buildEmail() {
   const subject = `Your CovaMarket Order is Ready for Pickup! 🎉 (${CONFIG.orderId})`;
+
+  // Generate QR code as base64 PNG (embeds inline — works in all email clients)
+  const qrDataUrl = await QRCode.toDataURL(CONFIG.pickCode, {
+    width:            200,
+    margin:           2,
+    color: { dark: '#ffffff', light: '#1a1a2e' },
+  });
 
   const html = `<!DOCTYPE html>
 <html>
@@ -106,6 +114,10 @@ function buildEmail() {
       <div class="code-value">${escHtml(CONFIG.pickCode)}</div>
       <div style="margin-top:12px;">
         <span class="locker-badge">Locker ${escHtml(CONFIG.locker)}</span>
+      </div>
+      <div style="margin-top:18px;">
+        <div style="color:#aaa; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:8px;">Scan to enter code</div>
+        <img src="${qrDataUrl}" alt="QR Code for ${escHtml(CONFIG.pickCode)}" width="140" height="140" style="border-radius:8px;" />
       </div>
     </div>
 
@@ -282,7 +294,7 @@ async function sendEmail() {
   if (!CONFIG.toEmail)       throw new Error('TO_EMAIL not set');
   if (!CONFIG.pickCode)      throw new Error('PICK_CODE not set');
 
-  const { subject, html, text } = buildEmail();
+  const { subject, html, text } = await buildEmail();
   const mime = buildMimeMessage({ subject, html, text });
 
   console.log(`📧 Sending email to: ${CONFIG.toEmail}`);
