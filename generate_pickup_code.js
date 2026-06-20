@@ -215,6 +215,7 @@ async function cleanStaleTrackerEntries(allRecords) {
 
   const now = Date.now();
   let cleaned = 0;
+  const roadIdsToReplenish = [];
   for (const [roadId, entry] of Object.entries(activeLockers)) {
     const ageHours = entry.createdAt
       ? (now - new Date(entry.createdAt).getTime()) / 3600000
@@ -230,12 +231,17 @@ async function cleanStaleTrackerEntries(allRecords) {
       console.log(`🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — ${reason}`);
       delete activeLockers[roadId];
       cleaned++;
+      roadIdsToReplenish.push(roadId);  // queue for stock replenishment
     }
   }
 
   if (cleaned > 0) {
     saveActiveLockers(activeLockers);
     console.log(`🧹 Cleaned ${cleaned} stale tracker entry/entries.`);
+    // Auto-replenish channels that were freed up (collected or expired)
+    if (roadIdsToReplenish.length) {
+      await replenishRoads(roadIdsToReplenish);
+    }
   } else {
     console.log('✅ Tracker is clean — all entries still pending in API.');
   }
@@ -292,32 +298,42 @@ async function getPendingLockerNames(allRecords) {
   const names   = new Set(pending.map(r => r.goodsName).filter(Boolean));
 
   console.log(`🔒 Pending codes (status=0): ${pending.length} found`);
-  pending.forEach(r =>
+  // Only log first 5 to keep output concise
+  pending.slice(0, 5).forEach(r =>
     console.log(`  code=${r.pickCode} | goodsName="${r.goodsName}" | orderNo=${r.pickOrderNum}`)
   );
+  if (pending.length > 5) console.log(`  ... and ${pending.length - 5} more`);
   console.log(`🔒 Pending locker names: [${[...names].join(', ')}]`);
   return names;
 }
 
 // ── Targeted query for a specific locker ─────────────────────────────────────
-async function fetchPendingForLocker(lockerName) {
+// NOTE: goodsName URL filter is ignored server-side — fetch all pending and match by roadId.
+// roadId is the only reliable unique identifier per channel slot.
+async function fetchPendingForLocker(roadId, goodsName) {
   const res = await withAutoRefresh(() =>
     request(
-      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=50&funId=${CONFIG.funId}&goodsName=${encodeURIComponent(lockerName)}&pickStatus=0&_t=${Date.now()}`,
+      `${CONFIG.baseUrl}/api/pickInfo/list?current=1&size=100&funId=${CONFIG.funId}&pickStatus=0&_t=${Date.now()}`,
       { method: 'GET', headers: authHeaders() }
     )
   );
   const recs = res.body?.data?.records || res.body?.rows || res.body?.data || [];
   if (!Array.isArray(recs)) return [];
+
+  // Log what goodsNames we actually see in the response (helps debug name mismatches)
+  const seen = [...new Set(recs.map(r => r.goodsName).filter(Boolean))];
+  console.log(`   API goodsNames seen: [${seen.join(', ')}]`);
+
+  // Match by goodsName (primary) — falls back to any pending record if roadId somehow matches
   return recs.filter(r =>
-    r.goodsName === lockerName &&
+    r.goodsName === goodsName &&
     (r.pickStatus ?? r.status ?? -1) === 0
   );
 }
 
-async function snapshotLockerPending(lockerName) {
-  console.log(`📸 Snapshotting pending codes for "${lockerName}"...`);
-  const recs     = await fetchPendingForLocker(lockerName);
+async function snapshotLockerPending(locker) {
+  console.log(`📸 Snapshotting pending codes for "${locker.goodsName}" (roadId=${locker.roadId})...`);
+  const recs     = await fetchPendingForLocker(locker.roadId, locker.goodsName);
   const orderNos = new Set(recs.map(r => r.pickOrderNum).filter(Boolean));
   const codes    = new Set(recs.map(r => r.pickCode).filter(Boolean));
   console.log(`  Found ${recs.length} existing pending record(s): orderNos=[${[...orderNos].join(', ')}] codes=[${[...codes].join(', ')}]`);
@@ -345,15 +361,39 @@ async function addPickInfo(locker) {
   return res.body;
 }
 
+// ── Replenish channel stock ───────────────────────────────────────────────────
+/**
+ * Call replenishRoad for one or more roadIds to reset stock back to 1.
+ * Triggered automatically after stale tracker cleanup detects a collected/expired code.
+ * Payload is a comma-separated string of roadIds (confirmed from browser DevTools).
+ */
+async function replenishRoads(roadIds) {
+  if (!roadIds || !roadIds.length) return;
+  const payload = roadIds.join(',');
+  console.log(`🔄 Replenishing roadIds: ${payload}`);
+  // Payload is a plain comma-separated string of roadIds (confirmed from DevTools)
+  const headers = authHeaders();
+  headers['Content-Type'] = 'text/plain;charset=UTF-8';
+  const res = await withAutoRefresh(() =>
+    request(
+      `${CONFIG.baseUrl}/api/roadInfo/replenishRoad`,
+      { method: 'POST', headers },
+      payload
+    )
+  );
+  console.log(`   replenishRoad status: ${res.status} | response: ${JSON.stringify(res.body)}`);
+  return res.body;
+}
+
 // ── Poll for new code ─────────────────────────────────────────────────────────
-async function waitForNewCodeForLocker(lockerName, beforeOrderNos, beforeCodes, { maxAttempts = 15, delayMs = 5000 } = {}) {
-  console.log(`\n⏳ Polling targeted query for "${lockerName}" (up to ${maxAttempts * delayMs / 1000}s)...`);
+async function waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes, { maxAttempts = 15, delayMs = 5000 } = {}) {
+  console.log(`\n⏳ Polling for new code on "${locker.goodsName}" roadId=${locker.roadId} (up to ${maxAttempts * delayMs / 1000}s)...`);
   console.log(`   Before: orderNos=[${[...beforeOrderNos].join(', ')}] codes=[${[...beforeCodes].join(', ')}]`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await sleep(delayMs);
-    const recs = await fetchPendingForLocker(lockerName);
-    console.log(`  Attempt ${attempt}/${maxAttempts} — found ${recs.length} pending record(s) for "${lockerName}"`);
+    const recs = await fetchPendingForLocker(locker.roadId, locker.goodsName);
+    console.log(`  Attempt ${attempt}/${maxAttempts} — found ${recs.length} pending record(s) for "${locker.goodsName}"`);
     recs.forEach(r => console.log(`    code=${r.pickCode} orderNo=${r.pickOrderNum} status=${r.pickStatus ?? r.status}`));
 
     const newRec = recs.find(r => {
@@ -376,7 +416,10 @@ async function waitForNewCodeForLocker(lockerName, beforeOrderNos, beforeCodes, 
 function mkLocker(ch) {
   const lockerLabel = `${ch.roadRow}-${ch.roadColumn}`;  // ✅ row-column matches UI
   const lockerName  = `Locker ${lockerLabel}`;
-  console.log(`\n✅ Selected: ${lockerName} | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
+  // goodsName from API may differ per machine (e.g. "Locker2 1-1" for LRTPantai)
+  // Capture it here so polling can match by roadId instead of constructed name
+  const goodsName   = ch.goodsName || ch.commodityName || lockerName;
+  console.log(`\n✅ Selected: ${lockerName} | goodsName="${goodsName}" | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
   return {
     goodsId:     ch.goodsId,
     roadId:      ch.roadId,
@@ -384,6 +427,7 @@ function mkLocker(ch) {
     column:      ch.roadColumn,
     lockerLabel,
     lockerName,
+    goodsName,
   };
 }
 
@@ -394,26 +438,26 @@ async function findFreeLocker(channels, pendingLockerNames, cleanedActiveLockers
   console.log(`📋 active_lockers.json entries after cleanup: [${[...activeRoadIds].join(', ')}]`);
 
   channels.forEach(ch => {
-    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
-    const hasPending = pendingLockerNames.has(lockerName);
+    const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    const goodsName = ch.goodsName || ch.commodityName || `Locker ${ch.roadRow}-${ch.roadColumn}`;
+    const hasPending = pendingLockerNames.has(goodsName);
     const isActive   = activeRoadIds.has(String(ch.roadId));
-    console.log(`  ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingAPI=${hasPending} | inTracker=${isActive}`);
+    console.log(`  ${ch.roadRow}-${ch.roadColumn} | goodsName="${goodsName}" | roadId=${ch.roadId} | goodsId=${ch.goodsId ?? 'NULL'} | stock=${stock} | pendingAPI=${hasPending} | inTracker=${isActive}`);
   });
 
   const free = channels.filter(ch => {
-    const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-    const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
-    return stock > 0 && !pendingLockerNames.has(lockerName) && !activeRoadIds.has(String(ch.roadId));
+    const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+    const goodsName = ch.goodsName || ch.commodityName || `Locker ${ch.roadRow}-${ch.roadColumn}`;
+    return stock > 0 && !pendingLockerNames.has(goodsName) && !activeRoadIds.has(String(ch.roadId));
   });
 
   if (!free.length) {
     // Fallback: ignore tracker (already cleaned), use API pending state only
     console.warn('⚠️  No free locker (tracker + API) — falling back to API pending state only');
     const free2 = channels.filter(ch => {
-      const stock      = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
-      const lockerName = `Locker ${ch.roadRow}-${ch.roadColumn}`;
-      return stock > 0 && !pendingLockerNames.has(lockerName);
+      const stock     = ch.roadStock ?? ch.stock ?? ch.goodsNum ?? 0;
+      const goodsName = ch.goodsName || ch.commodityName || `Locker ${ch.roadRow}-${ch.roadColumn}`;
+      return stock > 0 && !pendingLockerNames.has(goodsName);
     });
     if (!free2.length) throw new Error('No free lockers available — all lockers occupied or out of stock!');
     return mkLocker(free2[0]);
@@ -474,7 +518,7 @@ async function main() {
     const locker = await findFreeLocker(channels, pendingLockerNames, cleanedActiveLockers);
 
     // ── Snapshot BEFORE ───────────────────────────────────────────────────────
-    const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker.lockerName);
+    const { orderNos: beforeOrderNos, codes: beforeCodes } = await snapshotLockerPending(locker);
 
     // ── Create pickup code ────────────────────────────────────────────────────
     const result = await addPickInfo(locker);
@@ -494,7 +538,7 @@ async function main() {
     if (pickCode) {
       console.log(`✅ pickCode in response: ${pickCode}`);
     } else {
-      const newRec = await waitForNewCodeForLocker(locker.lockerName, beforeOrderNos, beforeCodes);
+      const newRec = await waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes);
       if (newRec) {
         pickCode = newRec.pickCode;
         orderNo  = newRec.pickOrderNum;
