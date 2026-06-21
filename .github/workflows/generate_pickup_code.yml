@@ -130,7 +130,46 @@ jobs:
               console.log('  Sending to ' + o.customerEmail + ' for order ' + o.orderId);
               execSync('node send_email.js', { env, stdio: 'inherit' });
             }
-          " 
+          "
+
+      - name: Send pickup code WhatsApp to customers
+        if: success() && steps.generate.outputs.pick_code != ''
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WA_FROM:     ${{ secrets.TWILIO_WA_FROM }}
+        run: |
+          echo "📱 Sending pickup code WhatsApp messages..."
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
+            const phoneRegex = /^\+\d{7,15}$/;
+            const validOrders = orders.filter(o => {
+              const phone = (o.customerPhone || '').trim();
+              if (!phone || phone === 'N/A' || !phoneRegex.test(phone)) {
+                console.log('  ⚠️  Skipping order ' + o.orderId + ' — no valid phone (got: ' + (o.customerPhone || 'empty') + ')');
+                return false;
+              }
+              return true;
+            });
+            console.log('Sending ' + validOrders.length + ' WhatsApp(s) (skipped ' + (orders.length - validOrders.length) + ' with missing/invalid phone)...');
+            for (const o of validOrders) {
+              const env = {
+                ...process.env,
+                TO_PHONE:        o.customerPhone  || '',
+                CUSTOMER_NAME:   o.customerName   || '',
+                ORDER_ID:        o.orderId         || '',
+                PICK_CODE:       o.pickCode        || '',
+                LOCKER:          o.locker          || '',
+                PICKUP_LOCATION: o.orderLocation   || '',
+                PICKUP_DATE:     o.pickupDate      || '',
+                PICKUP_TIME:     o.pickupTime      || '',
+              };
+              console.log('  Sending WhatsApp to ' + o.customerPhone + ' for order ' + o.orderId);
+              execSync('node send_whatsapp.js', { env, stdio: 'inherit' });
+            }
+          "
 
       - name: Commit tracking files
         if: success() && steps.generate.outputs.pick_code != ''
