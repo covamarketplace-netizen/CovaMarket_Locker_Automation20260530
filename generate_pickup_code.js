@@ -34,7 +34,7 @@ const path   = require('path');
 // Add new locations here as you expand to more sites.
 const LOCATION_FUN_MAP = {
   'lrt lembah subang': 716,
-  'lrt pantai':        715,
+  'lrt sentul timur':        715,
 };
 
 function resolveFunId(orderLocation) {
