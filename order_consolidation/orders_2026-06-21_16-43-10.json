@@ -28,25 +28,5 @@
     "pickup_type": "Advance Pickup",
     "pickup_date": "Tue, 23 Jun 2026",
     "pickup_time": "7:00 AM - 1:00 PM"
-  },
-  {
-    "order_id": "#1448",
-    "customer_name": "dfd fgdg",
-    "email": "jhlee1214@gmail.com",
-    "phone": "+60108668014",
-    "order_location": "LRT Sentul Timur",
-    "pickup_type": "Advance Pickup",
-    "pickup_date": "Tue, 23 Jun 2026",
-    "pickup_time": "1:00 PM - 7:00 PM"
-  },
-  {
-    "order_id": "#1449",
-    "customer_name": "Ke Ke",
-    "email": "hee.kern@gmail.com",
-    "phone": "+60143222146",
-    "order_location": "LRT Sentul Timur",
-    "pickup_type": "Advance Pickup",
-    "pickup_date": "Mon, 22 Jun 2026",
-    "pickup_time": "1:00 PM - 7:00 PM"
   }
 ]
