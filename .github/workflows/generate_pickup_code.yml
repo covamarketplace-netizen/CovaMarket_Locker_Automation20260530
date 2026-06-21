@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install dependencies
         run: npm install qrcode
@@ -105,8 +105,17 @@ jobs:
             const { execSync } = require('child_process');
             const fs = require('fs');
             const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
-            console.log('Sending ' + orders.length + ' email(s)...');
-            for (const o of orders) {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            const validOrders = orders.filter(o => {
+              const email = (o.customerEmail || '').trim();
+              if (!email || email === 'N/A' || !emailRegex.test(email)) {
+                console.log('  ⚠️  Skipping order ' + o.orderId + ' — no valid email (got: ' + (o.customerEmail || 'empty') + ')');
+                return false;
+              }
+              return true;
+            });
+            console.log('Sending ' + validOrders.length + ' email(s) (skipped ' + (orders.length - validOrders.length) + ' with missing/invalid email)...');
+            for (const o of validOrders) {
               const env = {
                 ...process.env,
                 TO_EMAIL:        o.customerEmail || '',
