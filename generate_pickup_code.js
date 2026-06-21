@@ -388,7 +388,7 @@ async function replenishRoads(roadIds) {
 /**
  * Find all channels with stock=0 that have no pending code, and replenish them.
  * This ensures lockers are always ready — handles both:
- *   1. Channels that were never stocked (LRTPantai fresh setup)
+ *   1. Channels that were never stocked (LRTSentulTimur fresh setup)
  *   2. Channels emptied after pickup but stale tracker already cleaned
  */
 async function replenishEmptyChannels(channels, pendingLockerNames) {
@@ -445,7 +445,7 @@ async function waitForNewCodeForLocker(locker, beforeOrderNos, beforeCodes, { ma
 function mkLocker(ch) {
   const lockerLabel = `${ch.roadRow}-${ch.roadColumn}`;  // ✅ row-column matches UI
   const lockerName  = `Locker ${lockerLabel}`;
-  // goodsName from API may differ per machine (e.g. "Locker2 1-1" for LRTPantai)
+  // goodsName from API may differ per machine (e.g. "Locker2 1-1" for LRTSentulTimur)
   // Capture it here so polling can match by roadId instead of constructed name
   const goodsName   = ch.goodsName || ch.commodityName || lockerName;
   console.log(`\n✅ Selected: ${lockerName} | goodsName="${goodsName}" | roadId=${ch.roadId} | goodsId=${ch.goodsId}`);
