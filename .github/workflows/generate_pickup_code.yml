@@ -43,8 +43,9 @@ jobs:
       - name: Generate pickup code
         id: generate
         env:
-          XYZ_TOKEN:   ${{ secrets.XYZ_TOKEN }}
-          ORDERS_FILE: ${{ steps.order_file.outputs.path }}
+          XZY_APP_ID:     ${{ secrets.XZY_APP_ID }}
+          XZY_SECRET_KEY: ${{ secrets.XZY_SECRET_KEY }}
+          ORDERS_FILE:    ${{ steps.order_file.outputs.path }}
         run: |
           set +e
           node generate_pickup_code.js 2>&1 | tee /tmp/node_output.txt
