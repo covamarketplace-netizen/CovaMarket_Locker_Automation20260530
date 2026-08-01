@@ -35,6 +35,7 @@ const {
   createPickOrder,
   getFunByDept,
   getRoodById,
+  getGoodsById,
   findPick,
 } = require('./xzyvend');
 
@@ -80,6 +81,24 @@ function saveActiveLockers(data) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(TRACKING_FILE, JSON.stringify(data, null, 2));
   console.log(`💾 Saved active_lockers.json (${Object.keys(data).length} entries)`);
+}
+
+// ── goodsId -> goodsName (the REAL, physically-accurate label — confirmed
+//    by physical test to match the actual printed door, unlike
+//    roadRow/roadColumn which is just an internal index) ─────────────────
+let goodsNameCache = null;
+async function getGoodsName(goodsId) {
+  if (!goodsNameCache) {
+    goodsNameCache = {};
+    let page = 1;
+    let items;
+    do {
+      items = await getGoodsById(page, 100);
+      for (const g of items) goodsNameCache[g.goodsId] = g.goodsName;
+      page++;
+    } while (items.length === 100 && page <= 5); // safety cap
+  }
+  return goodsNameCache[goodsId] || `Locker (goodsId ${goodsId})`;
 }
 
 // ── funId -> funNumber (find_pick needs funNumber, not funId) ─────────────
@@ -167,12 +186,13 @@ async function findLockerForOrder(funId, activeLockers) {
   }
 
   const chosen = stocked[0];
+  const realLabel = await getGoodsName(chosen.goodsId);
   return {
     goodsId: chosen.goodsId,
     roadId: chosen.roadId,
     roadRow: chosen.roadRow,
     roadColumn: chosen.roadColumn,
-    lockerLabel: `${chosen.roadRow}-${chosen.roadColumn}`,
+    lockerLabel: realLabel, // was `${chosen.roadRow}-${chosen.roadColumn}` — confirmed wrong via physical test
   };
 }
 

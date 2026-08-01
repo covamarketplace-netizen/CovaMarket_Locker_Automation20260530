@@ -133,6 +133,16 @@ async function findFunByImei(imei, maxPages = 5) {
 }
 
 /**
+ * List product/goods info (includes the real, human-set goodsName —
+ * confirmed via physical testing to match the actual printed door label,
+ * unlike roadRow/roadColumn which is just an internal index).
+ */
+async function getGoodsById(current = 1, size = 100) {
+  const res = await callApi('getGoodsById', { current, size });
+  return res?.data?.records || res?.data?.list || res?.data || [];
+}
+
+/**
  * List all channels for a device (row/column -> goodsId/roadStock mapping).
  */
 async function getRoodById(funId) {
@@ -173,6 +183,7 @@ module.exports = {
   getFunByDept,
   findFunByImei,
   getRoodById,
+  getGoodsById,
   createPickOrder,
   findPick,
   MACHINES,
