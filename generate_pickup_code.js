@@ -145,11 +145,10 @@ async function cleanStaleTrackerEntries(funId) {
       // Only free the locker on an EXPLICIT Completed(1) or Voided(3).
       // 0 (Pending) and 2 (Failed) stay tracked — a failed pickup doesn't
       // necessarily mean the item is gone, so don't auto-release it.
-      // Anything else (undefined/missing) means find_pick didn't return a
-      // clean record — often because a code was JUST created and hasn't
-      // been indexed yet. Treating that as "confirmed free" caused a real
-      // double-booking (same roadId issued 2 different codes in one run).
-      // When ambiguous, stay conservative: leave it tracked.
+      // pickStatus undefined should now be rare (fixed the array-wrapping
+      // bug in findPick — pending codes correctly return pickStatus:0
+      // now). If it still happens, stay conservative and leave it tracked
+      // rather than guessing.
       if (pickStatus === 1 || pickStatus === 3) {
         console.log(
           `🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — pickStatus=${pickStatus} (confirmed done)`
@@ -162,7 +161,19 @@ async function cleanStaleTrackerEntries(funId) {
         );
       }
     } catch (err) {
-      console.warn(`⚠️  Could not check pickCode ${entry.pickCode} (roadId=${roadId}): ${err.message}`);
+      // '未查询到取货码信息' (code not found) is confirmed, via real physical
+      // testing, to mean the code was already collected — not that it never
+      // existed. Free the locker. Any OTHER error stays conservative
+      // (leave tracked) since we don't know what it means.
+      if (err.message.includes('未查询到取货码信息')) {
+        console.log(
+          `🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — code not found (confirmed = collected)`
+        );
+        delete activeLockers[roadId];
+        cleaned++;
+      } else {
+        console.warn(`⚠️  Could not check pickCode ${entry.pickCode} (roadId=${roadId}): ${err.message}`);
+      }
     }
   }
 

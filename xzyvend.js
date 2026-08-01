@@ -174,7 +174,10 @@ async function createPickOrder({
  */
 async function findPick(funNumber, pickCode) {
   const res = await callApi('find_pick', { funNumber, pickCode });
-  return res?.data;
+  const data = res?.data;
+  // Pending records come back wrapped in an array (confirmed via debug
+  // output: [{"pickId":...,"pickStatus":0}]) — not documented, but real.
+  return Array.isArray(data) ? data[0] : data;
 }
 
 module.exports = {
