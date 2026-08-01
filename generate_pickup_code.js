@@ -31,6 +31,13 @@
 
 const fs = require('fs');
 const path = require('path');
+
+// ── Dry-run mode ────────────────────────────────────────────────────────
+// Detected via --dry-run flag or DRY_RUN=1 env var. Does everything real
+// (fetches live channels/stock, resolves labels, tracks selections to
+// prevent overlap within the run) EXCEPT the actual create_pick_order
+// call — no real pickup codes get generated on XZY's system.
+const DRY_RUN = process.argv.includes('--dry-run') || process.env.DRY_RUN === '1';
 const {
   createPickOrder,
   getFunByDept,
@@ -59,7 +66,11 @@ function resolveFunId(orderLocation) {
   );
 }
 
-const TRACKING_FILE = path.join(__dirname, 'pickup_codes', 'active_lockers.json');
+const TRACKING_FILE = path.join(
+  __dirname,
+  'pickup_codes',
+  DRY_RUN ? 'dry_run_active_lockers.json' : 'active_lockers.json'
+);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -165,7 +176,38 @@ async function cleanStaleTrackerEntries(funId) {
   return activeLockers;
 }
 
-// ── Find a locker for this order ────────────────────────────────────────
+// ── Locker label resolution — CONFIRMED to differ per machine ─────────────
+// Physical testing (2026-08-01) showed the two machines are inconsistent
+// with each other, not just with the API's internal indexing:
+//
+//   funId 716 (LRTLembahSubang): roadId 96358 (roadRow:2, roadColumn:1)
+//     physically opened the door labeled "1-2" — matching its goodsName
+//     ("Locker 1-2"), NOT roadRow-roadColumn. -> trust goodsName.
+//
+//   funId 715 (LRTSentulTimur): roadId 903514 (roadRow:3, roadColumn:1)
+//     physically opened the door the user counted as row 3, column 1 —
+//     matching roadRow-roadColumn EXACTLY, NOT its goodsName
+//     ("Locker2 2-3", which matches neither digit order).
+//     This also lines up with 715 having confirmed mislabeled products
+//     elsewhere ("Locker 3-2" / "Locker 6-2" missing their "2") — this
+//     machine's goodsName values look generally unreliable.
+//
+// Each confirmed by exactly ONE physical test per machine, not all 14
+// channels — treat as best evidence so far, not exhaustively verified.
+// Re-check if a customer ever reports the wrong door.
+const LABEL_SOURCE_BY_FUN_ID = {
+  715: 'roadRowColumn',
+  716: 'goodsName',
+};
+
+async function resolveLockerLabel(funId, channel) {
+  const source = LABEL_SOURCE_BY_FUN_ID[funId];
+  if (source === 'roadRowColumn') {
+    return `${channel.roadRow}-${channel.roadColumn}`;
+  }
+  // Default / 716: use goodsName
+  return getGoodsName(channel.goodsId);
+}
 // Only uses channels that ALREADY have stock. No login/JWT is used
 // anywhere in this file — if nothing is stocked, this fails clearly and
 // tells you to restock via XZY's H5 mobile page (their own recommended
@@ -197,13 +239,13 @@ async function findLockerForOrder(funId, activeLockers) {
   }
 
   const chosen = stocked[0];
-  const realLabel = await getGoodsName(chosen.goodsId);
+  const realLabel = await resolveLockerLabel(funId, chosen);
   return {
     goodsId: chosen.goodsId,
     roadId: chosen.roadId,
     roadRow: chosen.roadRow,
     roadColumn: chosen.roadColumn,
-    lockerLabel: realLabel, // was `${chosen.roadRow}-${chosen.roadColumn}` — confirmed wrong via physical test
+    lockerLabel: realLabel,
   };
 }
 
@@ -221,6 +263,9 @@ async function main() {
     if (!orders.length) throw new Error(`No orders found in ${orderPath}`);
 
     console.log(`\n📦 Found ${orders.length} order(s) to process\n`);
+    if (DRY_RUN) {
+      console.log('🧪 DRY RUN — no real pickup codes will be created on XZY.\n');
+    }
 
     for (let i = 0; i < orders.length; i++) {
       const order = orders[i];
@@ -239,13 +284,18 @@ async function main() {
         const locker = await findLockerForOrder(funId, activeLockers);
         console.log(`✅ Selected locker ${locker.lockerLabel} (roadId=${locker.roadId}, goodsId=${locker.goodsId})`);
 
-        const result = await createPickOrder({
-          funId,
-          goodsId: locker.goodsId,
-          pickType: 0,
-          roadColumn: locker.roadColumn,
-          roadRow: locker.roadRow,
-        });
+        const result = DRY_RUN
+          ? {
+              pickCode: `DRY${String(i + 1).padStart(3, '0')}`,
+              pickOrderNum: `DRYRUN-${Date.now()}-${i + 1}`,
+            }
+          : await createPickOrder({
+              funId,
+              goodsId: locker.goodsId,
+              pickType: 0,
+              roadColumn: locker.roadColumn,
+              roadRow: locker.roadRow,
+            });
 
         if (!result?.pickCode) {
           throw new Error(`create_pick_order did not return a pickCode: ${JSON.stringify(result)}`);
@@ -270,6 +320,7 @@ async function main() {
           'OUTPUT_JSON:' +
             JSON.stringify({
               success: true,
+              dryRun: DRY_RUN,
               pickCode: result.pickCode,
               orderNo: result.pickOrderNum || null,
               locker: locker.lockerLabel,
