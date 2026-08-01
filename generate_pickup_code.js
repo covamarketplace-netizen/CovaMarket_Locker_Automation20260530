@@ -131,13 +131,24 @@ async function cleanStaleTrackerEntries(funId) {
     try {
       const status = await findPick(funNumber, entry.pickCode);
       const pickStatus = status?.pickStatus;
-      // 0 = Pending (still occupied). Anything else = free again.
-      if (pickStatus !== 0) {
+      // Only free the locker on an EXPLICIT Completed(1) or Voided(3).
+      // 0 (Pending) and 2 (Failed) stay tracked — a failed pickup doesn't
+      // necessarily mean the item is gone, so don't auto-release it.
+      // Anything else (undefined/missing) means find_pick didn't return a
+      // clean record — often because a code was JUST created and hasn't
+      // been indexed yet. Treating that as "confirmed free" caused a real
+      // double-booking (same roadId issued 2 different codes in one run).
+      // When ambiguous, stay conservative: leave it tracked.
+      if (pickStatus === 1 || pickStatus === 3) {
         console.log(
-          `🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — pickStatus=${pickStatus}`
+          `🧹 Removing stale tracker: roadId=${roadId} locker=${entry.locker} — pickStatus=${pickStatus} (confirmed done)`
         );
         delete activeLockers[roadId];
         cleaned++;
+      } else if (pickStatus === undefined) {
+        console.log(
+          `⏳ Skipping roadId=${roadId} locker=${entry.locker} — pickStatus unknown/not yet indexed, leaving tracked`
+        );
       }
     } catch (err) {
       console.warn(`⚠️  Could not check pickCode ${entry.pickCode} (roadId=${roadId}): ${err.message}`);
