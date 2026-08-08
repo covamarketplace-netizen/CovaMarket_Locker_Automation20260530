@@ -1,5 +1,7 @@
 {
+  "name": "shopify-orders",
+  "version": "1.0.0",
   "dependencies": {
-    "dotenv": "^17.4.2"
+    "dotenv": "^16.4.5"
   }
 }
