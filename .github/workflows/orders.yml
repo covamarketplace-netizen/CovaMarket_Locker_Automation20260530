@@ -1,9 +1,9 @@
 name: Fetch Shopify Orders
 
 on:
-  workflow_dispatch:        # lets you run it manually with a button
-  schedule:
-    - cron: '0 0 * * *'     # also runs automatically daily at 00:00 UTC
+  workflow_dispatch:
+  repository_dispatch:
+    types: [shopify-order]      # <-- Lambda will send this event type
 
 jobs:
   fetch-orders:
