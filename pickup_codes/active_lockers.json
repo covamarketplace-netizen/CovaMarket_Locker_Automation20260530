@@ -8,12 +8,12 @@
     "createdAt": "2026-08-01T10:43:02.537Z"
   },
   "96351": {
-    "pickCode": "665802",
-    "orderNo": "202608011836431248cc9",
+    "pickCode": "108388",
+    "orderNo": "202608092053018448b98",
     "locker": "Locker 1-1",
     "goodsId": 5556,
     "funId": 716,
-    "createdAt": "2026-08-01T10:36:43.252Z"
+    "createdAt": "2026-08-09T12:53:01.984Z"
   },
   "903514": {
     "pickCode": "495951",
@@ -110,101 +110,5 @@
     "goodsId": 6089,
     "funId": 715,
     "createdAt": "2026-08-01T10:37:58.737Z"
-  },
-  "912337": {
-    "pickCode": "504760",
-    "orderNo": "202608011836474718c52",
-    "locker": "Locker 2-1",
-    "goodsId": 6091,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:36:47.599Z"
-  },
-  "912338": {
-    "pickCode": "848137",
-    "orderNo": "202608011836519648877",
-    "locker": "Locker 2-2",
-    "goodsId": 6085,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:36:52.091Z"
-  },
-  "912339": {
-    "pickCode": "629170",
-    "orderNo": "20260801183656777acac",
-    "locker": "Locker 3-1",
-    "goodsId": 6079,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:36:56.906Z"
-  },
-  "912340": {
-    "pickCode": "763122",
-    "orderNo": "20260801183701912aae8",
-    "locker": "Locker 3-2",
-    "goodsId": 6086,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:02.039Z"
-  },
-  "912341": {
-    "pickCode": "400692",
-    "orderNo": "20260801183707367a935",
-    "locker": "Locker 4-1",
-    "goodsId": 6080,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:07.495Z"
-  },
-  "912342": {
-    "pickCode": "228438",
-    "orderNo": "202608011837131469a87",
-    "locker": "Locker 4-2",
-    "goodsId": 6087,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:13.272Z"
-  },
-  "912343": {
-    "pickCode": "372612",
-    "orderNo": "20260801183719252acb1",
-    "locker": "Locker 5-1",
-    "goodsId": 6081,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:19.380Z"
-  },
-  "912344": {
-    "pickCode": "484237",
-    "orderNo": "20260801183725677ad36",
-    "locker": "Locker 5-2",
-    "goodsId": 6088,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:25.803Z"
-  },
-  "912345": {
-    "pickCode": "172821",
-    "orderNo": "20260801183732423948d",
-    "locker": "Locker 6-1",
-    "goodsId": 6082,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:32.551Z"
-  },
-  "912346": {
-    "pickCode": "356157",
-    "orderNo": "20260801183739484a297",
-    "locker": "Locker 6-2",
-    "goodsId": 6089,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:37:39.611Z"
-  },
-  "912347": {
-    "pickCode": "367320",
-    "orderNo": "20260801184306917a5a7",
-    "locker": "Locker 1-2",
-    "goodsId": 6084,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:43:07.044Z"
-  },
-  "912348": {
-    "pickCode": "826747",
-    "orderNo": "202608011843146299cda",
-    "locker": "Locker 7-1",
-    "goodsId": 6083,
-    "funId": 716,
-    "createdAt": "2026-08-01T10:43:14.756Z"
   }
 }
