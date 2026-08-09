@@ -12,6 +12,10 @@ jobs:
       SHOPIFY_STORE:         ${{ secrets.SHOPIFY_STORE }}
       SHOPIFY_CLIENT_ID:     ${{ secrets.SHOPIFY_CLIENT_ID }}
       SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+      GITHUB_TOKEN:          ${{ secrets.GH_PAT }}
+      GITHUB_OWNER:          ${{ secrets.GH_OWNER }}
+      GITHUB_REPO:           ${{ secrets.GH_REPO }}
+
     steps:
       - name: Get the code
         uses: actions/checkout@v4
