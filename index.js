@@ -10,7 +10,7 @@ const githubToken  = process.env.GITHUB_TOKEN;
 const githubOwner  = process.env.GITHUB_OWNER;
 const githubRepo   = process.env.GITHUB_REPO;
 const githubBranch = process.env.GITHUB_BRANCH || 'main';
-const githubFolder = process.env.GITHUB_FOLDER || 'orders';
+const githubFolder = process.env.GITHUB_FOLDER || 'order_consolidation';
 
 const today = new Date().toISOString().split('T')[0];
 
@@ -90,7 +90,10 @@ function formatPhone(rawPhone, countryCode) {
 
 const query = `
 query {
-  orders(first: 100, query: "created_at:>=${today} AND shipping_method:'Free Pickup'") {
+  orders(first: 1,
+  sortKey: CREATED_AT,
+  reverse: true,  
+  query:"created_at:>=${today} AND shipping_method:'Free Pickup'") {
     edges {
       node {
         id
