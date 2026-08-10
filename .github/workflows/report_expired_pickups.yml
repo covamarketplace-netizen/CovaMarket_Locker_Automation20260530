@@ -1,0 +1,30 @@
+name: Report Expired Pickup Codes
+
+# Runs daily at 21:30 MYT (13:30 UTC), read-only — no auto-cancel, no JWT.
+# Emails a checklist for staff to action manually.
+on:
+  schedule:
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+
+jobs:
+  report-expired-pickups:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run report job
+        env:
+          XZY_APP_ID: ${{ secrets.XZY_APP_ID }}
+          XZY_SECRET_KEY: ${{ secrets.XZY_SECRET_KEY }}
+          GMAIL_USER: covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADMIN_ALERT_EMAIL: ${{ secrets.ADMIN_ALERT_EMAIL }}
+        run: node report_expired_pickups.js
