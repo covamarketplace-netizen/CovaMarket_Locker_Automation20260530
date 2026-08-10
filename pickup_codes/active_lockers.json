@@ -190,5 +190,13 @@
     "goodsId": 6089,
     "funId": 716,
     "createdAt": "2026-08-10T02:43:02.313Z"
+  },
+  "912347": {
+    "pickCode": "673651",
+    "orderNo": "20260810104856121baf7",
+    "locker": "Locker 1-2",
+    "goodsId": 6084,
+    "funId": 716,
+    "createdAt": "2026-08-10T02:48:56.255Z"
   }
 }
