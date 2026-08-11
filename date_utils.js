@@ -28,12 +28,15 @@ function formatDateForBucket(date) {
   return `${day}_${month}_${year}`;
 }
 
-// Determines slot (1 = 9AM-1PM, 2 = 1PM-7PM) from a pickup_time string
-// like "9:00 AM - 1:00 PM". Returns null if unrecognized.
+// Determines slot (1 = 7AM-12PM, 2 = 1PM-7PM) from a pickup_time string
+// like "7:00 AM - 12:00 PM". Returns null if unrecognized.
 function slotFromPickupTime(pickupTime) {
   if (!pickupTime) return null;
-  if (pickupTime.includes('9:00 AM')) return 1;
-  if (pickupTime.includes('1:00 PM')) return 2;
+  // startsWith, not includes — a range like "9:00 AM - 1:00 PM" (old
+  // format, no longer valid) isn't either current slot, but a loose
+  // .includes() check could still false-match it against '1:00 PM'.
+  if (pickupTime.startsWith('7:00 AM')) return 1;
+  if (pickupTime.startsWith('1:00 PM')) return 2;
   return null;
 }
 
