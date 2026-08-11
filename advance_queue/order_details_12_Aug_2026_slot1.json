@@ -7,7 +7,12 @@
     "order_location": "LRT Lembah Subang",
     "pickup_type": "Advance Pickup",
     "pickup_date": "Wed, 12 Aug 2026",
-    "pickup_time": "7:00 AM - 1:00 PM"
+    "pickup_time": "7:00 AM - 1:00 PM",
+    "assignedRoadId": 96351,
+    "assignedGoodsId": 5556,
+    "assignedRoadRow": 1,
+    "assignedRoadColumn": 1,
+    "assignedLocker": "Locker 1-1"
   },
   {
     "order_id": "#1601",
@@ -17,6 +22,11 @@
     "order_location": "LRT Lembah Subang",
     "pickup_type": "Advance Pickup",
     "pickup_date": "Wed, 12 Aug 2026",
-    "pickup_time": "7:00 AM - 1:00 PM"
+    "pickup_time": "7:00 AM - 1:00 PM",
+    "assignedRoadId": 912337,
+    "assignedGoodsId": 6091,
+    "assignedRoadRow": 2,
+    "assignedRoadColumn": 1,
+    "assignedLocker": "Locker 2-1"
   }
 ]
