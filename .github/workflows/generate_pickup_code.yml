@@ -203,7 +203,7 @@ jobs:
       #     "
 
       - name: Commit tracking files
-        if: success() && steps.generate.outputs.pick_code != ''
+        if: success() && steps.order_file.outputs.path != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
