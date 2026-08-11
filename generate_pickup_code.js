@@ -286,29 +286,40 @@ function todayDateKey() {
   return formatDateForBucket(nowInMYT());
 }
 
+// Instant Pickup draws from whichever slot's pool is "current" right now:
+// before 12PM MYT -> slot1's pool, 12PM onward (including the 12-1PM gap
+// and all of the afternoon) -> slot2's pool. Matches the same boundary
+// the slot1/slot2 advance releases use.
+function currentSlotNumber() {
+  const myt = nowInMYT();
+  return myt.getUTCHours() < 12 ? 1 : 2;
+}
+
 // Returns { allowed: bool, reason: string } — checks AND decrements
 // atomically (reads, checks, writes back) so multiple Instant orders in
 // the same batch consume budget correctly one after another.
 function consumeInstantCapacity(funId) {
   const dateKey = todayDateKey();
+  const slotNum = currentSlotNumber();
+  const slotKey = `slot${slotNum}`;
   const data = loadCapacityFile();
 
-  if (!data[dateKey] || data[dateKey][funId] === undefined) {
+  if (!data[dateKey] || data[dateKey][funId]?.[slotKey] === undefined) {
     console.log(
-      `⚠️  No Instant Pickup budget computed for ${dateKey}, funId ${funId} — ` +
+      `⚠️  No Instant Pickup budget computed for ${dateKey}, funId ${funId}, ${slotKey} — ` +
         `nightly job may not have run yet. Falling back to unlimited for now.`
     );
     return { allowed: true, reason: 'no-budget-set-fallback-unlimited' };
   }
 
-  const remaining = data[dateKey][funId];
+  const remaining = data[dateKey][funId][slotKey];
   if (remaining <= 0) {
-    return { allowed: false, reason: `Instant Pickup budget exhausted for ${dateKey} (funId ${funId})` };
+    return { allowed: false, reason: `Instant Pickup budget exhausted for ${dateKey} ${slotKey} (funId ${funId})` };
   }
 
-  data[dateKey][funId] = remaining - 1;
+  data[dateKey][funId][slotKey] = remaining - 1;
   saveCapacityFile(data);
-  return { allowed: true, reason: `consumed 1, ${remaining - 1} remaining` };
+  return { allowed: true, reason: `consumed 1 from ${slotKey}, ${remaining - 1} remaining` };
 }
 
 

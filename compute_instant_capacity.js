@@ -69,15 +69,20 @@ function main() {
   for (const [funId, locationName] of Object.entries(LOCATIONS)) {
     const slot1Count = slot1Orders.filter((o) => o.order_location === locationName).length;
     const slot2Count = slot2Orders.filter((o) => o.order_location === locationName).length;
-    const committed = slot1Count + slot2Count;
-    const instantCapacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - committed);
 
-    capacityData[dateKey][funId] = instantCapacity;
+    // Each slot has its OWN independent 14-locker cap now (matching
+    // accumulate_advance_orders.js) — NOT a combined total. A slot1
+    // instant order and a slot2 instant order can even end up using the
+    // same physical locker later in the day, same as Advance Pickup does.
+    const slot1Capacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - slot1Count);
+    const slot2Capacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - slot2Count);
+
+    capacityData[dateKey][funId] = { slot1: slot1Capacity, slot2: slot2Capacity };
 
     console.log(
       `${locationName} (funId ${funId}): ` +
-        `${slot1Count} slot1 + ${slot2Count} slot2 = ${committed} committed -> ` +
-        `${instantCapacity} Instant Pickup slot(s) available tomorrow`
+        `slot1: ${slot1Count} advance -> ${slot1Capacity} instant | ` +
+        `slot2: ${slot2Count} advance -> ${slot2Capacity} instant`
     );
   }
 
