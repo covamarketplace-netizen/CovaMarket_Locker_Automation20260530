@@ -417,13 +417,29 @@ async function main() {
           throw new Error(`create_pick_order did not return a pickCode: ${JSON.stringify(result)}`);
         }
 
+        // Instant Pickup means "today, right now" by definition — don't
+        // rely on whatever (if anything) Shopify sent for these fields.
+        // This also matters beyond display: report_expired_pickups.js
+        // uses this same pickupDate to detect no-shows, so a missing
+        // value here meant an uncollected Instant order could NEVER get
+        // flagged as overdue.
+        let displayPickupDate = order.pickup_date;
+        let displayPickupTime = order.pickup_time;
+        if (order.pickup_type === 'Instant Pickup') {
+          const myt = nowInMYT();
+          const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+          const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          displayPickupDate = `${days[myt.getUTCDay()]}, ${myt.getUTCDate()} ${months[myt.getUTCMonth()]} ${myt.getUTCFullYear()}`;
+          displayPickupTime = 'Available Now';
+        }
+
         activeLockers[locker.roadId] = {
           pickCode: result.pickCode,
           orderNo: result.pickOrderNum || null,
           locker: locker.lockerLabel,
           goodsId: locker.goodsId,
           funId,
-          pickupDate: order.pickup_date || null,
+          pickupDate: displayPickupDate || null,
           createdAt: new Date().toISOString(),
         };
         saveActiveLockers(activeLockers);
@@ -450,8 +466,8 @@ async function main() {
               customerEmail: order.email,
               customerPhone: order.phone || null,
               orderLocation: order.order_location,
-              pickupDate: order.pickup_date,
-              pickupTime: order.pickup_time,
+              pickupDate: displayPickupDate,
+              pickupTime: displayPickupTime,
             })
         );
       } catch (err) {
