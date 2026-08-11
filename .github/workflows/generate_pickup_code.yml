@@ -58,7 +58,7 @@ jobs:
           echo "path=$FILE" >> $GITHUB_OUTPUT
           echo "📋 Using order file: $FILE"
 
-      - name: Generate pickup code
+      - name: Sort & process incoming orders
         id: generate
         env:
           XZY_APP_ID:     ${{ secrets.XZY_APP_ID }}
@@ -66,7 +66,11 @@ jobs:
           ORDERS_FILE:    ${{ steps.order_file.outputs.path }}
         run: |
           set +e
-          node generate_pickup_code.js 2>&1 | tee /tmp/node_output.txt
+          # Instant Pickup orders get processed immediately inside this
+          # script (unchanged behavior). Advance Pickup orders get
+          # bucketed by date+slot instead — no code generated here; that
+          # happens later via release_slot1.yml / release_slot2.yml.
+          node accumulate_advance_orders.js 2>&1 | tee /tmp/node_output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           echo "────────────────────────"
 
@@ -204,7 +208,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
+          git add -f pickup_codes/active_lockers.json pickup_codes/latest.json advance_queue/
 
           echo "📋 Git status after add:"
           git status

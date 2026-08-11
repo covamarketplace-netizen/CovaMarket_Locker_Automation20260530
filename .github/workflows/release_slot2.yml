@@ -1,0 +1,144 @@
+name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
+
+# Fires at 12:20 PM MYT (04:20 UTC, same calendar day). Slot 1 now runs
+# 9AM-12PM (was 9AM-1PM), so by 12:20 there's a genuine 20-minute buffer
+# after slot 1's window fully closed — any slot-1 no-show is already
+# confirmed by then via the same cleanStaleTrackerEntries check
+# generate_pickup_code.js always runs. No more racing against an
+# in-progress slot, so this is a single release again (no wave 2 needed).
+on:
+  schedule:
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: release-slot-2
+  cancel-in-progress: false
+
+jobs:
+  release-slot-2:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: npm install qrcode
+
+      - name: Resolve today's slot 2 bucket
+        id: bucket
+        run: |
+          FILE=$(node release_slot.js 2)
+          echo "path=$FILE" >> $GITHUB_OUTPUT
+          if [ -z "$FILE" ]; then
+            echo "📋 No slot 2 orders waiting for today — nothing to release."
+          else
+            echo "📋 Releasing: $FILE"
+          fi
+
+      - name: Generate pickup codes
+        id: generate
+        if: steps.bucket.outputs.path != ''
+        env:
+          XZY_APP_ID: ${{ secrets.XZY_APP_ID }}
+          XZY_SECRET_KEY: ${{ secrets.XZY_SECRET_KEY }}
+          ORDERS_FILE: ${{ steps.bucket.outputs.path }}
+        run: |
+          set +e
+          node generate_pickup_code.js 2>&1 | tee /tmp/node_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "────────────────────────"
+
+          grep "OUTPUT_JSON:" /tmp/node_output.txt | sed 's/OUTPUT_JSON://' > /tmp/jsons.txt
+          echo "📦 JSON lines found: $(wc -l < /tmp/jsons.txt)"
+
+          node -e "
+            const fs = require('fs');
+            const lines = fs.readFileSync('/tmp/jsons.txt','utf8').trim().split('\n').filter(Boolean);
+            const results = [];
+            let firstCode = '';
+            for (const l of lines) {
+              try {
+                const d = JSON.parse(l);
+                if (d.success) {
+                  results.push(d);
+                  if (!firstCode) firstCode = d.pickCode || '';
+                }
+              } catch(e) {}
+            }
+            fs.writeFileSync('/tmp/success_orders.json', JSON.stringify(results));
+            fs.writeFileSync('/tmp/first_pick_code.txt', firstCode);
+            console.log('Parsed ' + results.length + ' successful order(s), first code: ' + firstCode);
+          "
+
+          FIRST=$(cat /tmp/first_pick_code.txt 2>/dev/null || echo "")
+          echo "pick_code=$FIRST" >> $GITHUB_OUTPUT
+
+          mkdir -p pickup_codes
+          cp /tmp/success_orders.json pickup_codes/latest.json 2>/dev/null || echo "[]" > pickup_codes/latest.json
+
+          exit $EXIT_CODE
+
+      - name: Send pickup code emails to customers
+        if: steps.bucket.outputs.path != '' && success() && steps.generate.outputs.pick_code != ''
+        env:
+          GMAIL_USER: covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          echo "📧 Sending pickup code emails..."
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+\$/;
+            const validOrders = orders.filter(o => {
+              const email = (o.customerEmail || '').trim();
+              if (!email || email === 'N/A' || !emailRegex.test(email)) {
+                console.log('  ⚠️  Skipping order ' + o.orderId + ' — no valid email');
+                return false;
+              }
+              return true;
+            });
+            console.log('Sending ' + validOrders.length + ' email(s)...');
+            for (const o of validOrders) {
+              const env = {
+                ...process.env,
+                TO_EMAIL:        o.customerEmail || '',
+                CUSTOMER_NAME:   o.customerName  || '',
+                ORDER_ID:        o.orderId        || '',
+                PICK_CODE:       o.pickCode       || '',
+                LOCKER:          o.locker         || '',
+                PICKUP_LOCATION: o.orderLocation  || '',
+                PICKUP_DATE:     o.pickupDate     || '',
+                PICKUP_TIME:     o.pickupTime     || '',
+              };
+              console.log('  Sending to ' + o.customerEmail + ' for order ' + o.orderId);
+              execSync('node send_email.js', { env, stdio: 'inherit' });
+            }
+          "
+
+      - name: Trim bucket — flag any unresolved orders for manual attention
+        if: steps.bucket.outputs.path != ''
+        env:
+          GMAIL_USER: covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADMIN_ALERT_EMAIL: ${{ secrets.ADMIN_ALERT_EMAIL }}
+        run: node trim_bucket_after_wave.js "${{ steps.bucket.outputs.path }}" /tmp/node_output.txt --final
+
+      - name: Commit tracking files
+        if: steps.bucket.outputs.path != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f pickup_codes/active_lockers.json pickup_codes/latest.json advance_queue/
+          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: release slot 2 pickup codes [skip ci]"
+          git push

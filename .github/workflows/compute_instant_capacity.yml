@@ -1,0 +1,41 @@
+name: Compute Instant Pickup Capacity
+
+# Runs daily at 21:30 MYT (13:30 UTC) — same timing as the expired-pickup
+# report, right after the 9PM advance-booking cutoff for tomorrow.
+on:
+  schedule:
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: compute-instant-capacity
+  cancel-in-progress: false
+
+jobs:
+  compute-instant-capacity:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Compute tomorrow's Instant Pickup capacity
+        run: node compute_instant_capacity.js
+
+      - name: Commit updated capacity file
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f pickup_codes/instant_capacity.json
+          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: compute instant pickup capacity [skip ci]"
+          git push
