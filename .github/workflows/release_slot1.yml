@@ -1,12 +1,11 @@
-name: Release Advance Pickup Codes - Slot 1 (9AM-1PM)
+name: Release Advance Pickup Codes - Slot 1 (7AM-12PM)
 
-# Fires at 7:00 AM MYT. Since MYT = UTC+8, that's 23:00 UTC the PREVIOUS
-# calendar day — deliberately verified before writing this. release_slot.js
-# computes "today" correctly in MYT internally, independent of the
-# runner's own UTC date at trigger time.
+# Fires at 5:00 AM MYT (2 hours before slot 1's 7AM start). Since
+# MYT = UTC+8, that's 21:00 UTC the PREVIOUS calendar day — verified
+# before writing this.
 on:
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '0 21 * * *'
   workflow_dispatch:
 
 concurrency:

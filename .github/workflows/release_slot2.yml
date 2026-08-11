@@ -1,7 +1,7 @@
 name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
 
 # Fires at 12:20 PM MYT (04:20 UTC, same calendar day). Slot 1 now runs
-# 9AM-12PM (was 9AM-1PM), so by 12:20 there's a genuine 20-minute buffer
+# 7AM-12PM, so by 12:20 there's a genuine 20-minute buffer
 # after slot 1's window fully closed — any slot-1 no-show is already
 # confirmed by then via the same cleanStaleTrackerEntries check
 # generate_pickup_code.js always runs. No more racing against an
