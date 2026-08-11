@@ -220,7 +220,36 @@ async function resolveLockerLabel(funId, channel) {
   // Default / 716: use goodsName
   return getGoodsName(channel.goodsId);
 }
-// Only uses channels that ALREADY have stock. No login/JWT is used
+// For orders that already have a SPECIFIC locker pre-assigned (by
+// assign_lockers_for_tomorrow.js the night before) — checks ONLY that
+// exact locker. No fallback to a different one: if it's not free, this
+// order fails loudly and by name, rather than silently substituting a
+// different door the way findLockerForOrder does.
+async function useAssignedLocker(order, activeLockers) {
+  const roadId = order.assignedRoadId;
+  const label = order.assignedLocker;
+
+  if (!roadId) {
+    throw new Error(
+      `Order ${order.order_id} has no locker assignment — ` +
+        `assign_lockers_for_tomorrow.js may not have run for this date yet.`
+    );
+  }
+
+  if (activeLockers[String(roadId)]) {
+    throw new Error(`Locker ${label} not available for Order ${order.order_id} at ${order.order_location}`);
+  }
+
+  return {
+    goodsId: order.assignedGoodsId,
+    roadId: order.assignedRoadId,
+    roadRow: order.assignedRoadRow,
+    roadColumn: order.assignedRoadColumn,
+    lockerLabel: label,
+  };
+}
+
+
 // anywhere in this file — if nothing is stocked, this fails clearly and
 // tells you to restock via XZY's H5 mobile page (their own recommended
 // method), instead of silently attempting an auto-replenish that would
@@ -362,7 +391,13 @@ async function main() {
         await cleanStaleTrackerEntries(funId);
         const activeLockers = loadActiveLockers();
 
-        const locker = await findLockerForOrder(funId, activeLockers);
+        let locker;
+        if (order.assignedRoadId) {
+          console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — targeting it specifically, no substitution.`);
+          locker = await useAssignedLocker(order, activeLockers);
+        } else {
+          locker = await findLockerForOrder(funId, activeLockers);
+        }
         console.log(`✅ Selected locker ${locker.lockerLabel} (roadId=${locker.roadId}, goodsId=${locker.goodsId})`);
 
         const result = DRY_RUN
