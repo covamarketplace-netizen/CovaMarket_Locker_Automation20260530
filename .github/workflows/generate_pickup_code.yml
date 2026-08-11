@@ -45,16 +45,37 @@ jobs:
         id: order_file
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            # Process the file(s) THIS push actually added — not just
+            # Every new order file THIS push actually added — not just
             # "newest file in the folder", which races with other pushes.
-            FILE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} -- 'order_consolidation/orders_*.json' | tail -1)
+            FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} -- 'order_consolidation/orders_*.json')
           fi
           # Manual runs (workflow_dispatch) have no push diff to compare —
           # fall back to newest file in the folder.
-          if [ -z "$FILE" ]; then
-            FILE=$(ls order_consolidation/orders_*.json 2>/dev/null | sort | tail -1)
+          if [ -z "$FILES" ]; then
+            FILES=$(ls order_consolidation/orders_*.json 2>/dev/null | sort | tail -1)
           fi
-          if [ -z "$FILE" ]; then echo "❌ No order file found in order_consolidation/"; exit 1; fi
+          if [ -z "$FILES" ]; then echo "❌ No order file found in order_consolidation/"; exit 1; fi
+
+          COUNT=$(echo "$FILES" | grep -c .)
+          if [ "$COUNT" -gt 1 ]; then
+            echo "📋 $COUNT new order files in this push — merging into one combined batch"
+            node -e "
+              const fs = require('fs');
+              const files = process.argv[1].trim().split('\n');
+              let combined = [];
+              for (const f of files) {
+                const orders = JSON.parse(fs.readFileSync(f, 'utf8'));
+                combined = combined.concat(orders);
+                console.log('  +' + orders.length + ' order(s) from ' + f);
+              }
+              fs.writeFileSync('/tmp/combined_orders.json', JSON.stringify(combined, null, 2));
+              console.log('Merged ' + combined.length + ' total order(s) from ' + files.length + ' file(s)');
+            " "$FILES"
+            FILE="/tmp/combined_orders.json"
+          else
+            FILE="$FILES"
+          fi
+
           echo "path=$FILE" >> $GITHUB_OUTPUT
           echo "📋 Using order file: $FILE"
 
