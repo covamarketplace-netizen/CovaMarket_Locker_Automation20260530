@@ -38,6 +38,17 @@ const CONFIG = {
   pickupTime:    process.env.PICKUP_TIME      || 'N/A',
 };
 
+// Instant Pickup orders always carry this exact sentinel from
+// generate_pickup_code.js — used to phrase the collection note more
+// naturally ("today" instead of "by Tue, 11 Aug 2026").
+const isInstantPickup = CONFIG.pickupTime === 'Available Now';
+const collectByText = isInstantPickup
+  ? 'Please collect your order today.'
+  : `Please collect your order by <strong>${escHtml(CONFIG.pickupDate)}</strong>.`;
+const collectByTextPlain = isInstantPickup
+  ? 'Please collect your order today.'
+  : `Please collect your order by ${CONFIG.pickupDate}.`;
+
 // ── Build email HTML ──────────────────────────────────────────────────────────
 async function buildEmail() {
   const subject = `Your CovaMarket Order is Ready for Pickup! 🎉 (${CONFIG.orderId})`;
@@ -126,7 +137,7 @@ async function buildEmail() {
       <strong>📌 Things to Note:</strong>
       <ul>
         <li>This code is unique to your order — please do not share it.</li>
-        <li>Please collect your order by <strong>${escHtml(CONFIG.pickupDate)}</strong>.</li>
+        <li>${collectByText}</li>
         <li>Someone else may collect on your behalf — they will need this code.</li>
       </ul>
     </div>
@@ -159,7 +170,7 @@ PICKUP TIME     : ${CONFIG.pickupTime}
 YOUR PICKUP CODE: ${CONFIG.pickCode}
 LOCKER          : ${CONFIG.locker}
 
-Please present this code to collect your order.
+${collectByTextPlain}
 Do not share this code with anyone.
 
 Questions? Email us: covamarketplace@gmail.com
