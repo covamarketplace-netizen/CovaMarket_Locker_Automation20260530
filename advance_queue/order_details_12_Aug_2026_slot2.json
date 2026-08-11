@@ -8,5 +8,15 @@
     "pickup_type": "Advance Pickup",
     "pickup_date": "Wed, 12 Aug 2026",
     "pickup_time": "1:00 PM - 7:00 PM"
+  },
+  {
+    "order_id": "#1594",
+    "customer_name": "Hello Bello",
+    "email": "alejandra.evander92@gmail.com",
+    "phone": "+601123706860",
+    "order_location": "LRT Lembah Subang",
+    "pickup_type": "Advance Pickup",
+    "pickup_date": "Wed, 12 Aug 2026",
+    "pickup_time": "7:00 AM - 1:00 PM"
   }
 ]
