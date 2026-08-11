@@ -45,6 +45,7 @@ const {
   getGoodsById,
   findPick,
 } = require('./xzyvend');
+const { nowInMYT, formatDateForBucket } = require('./date_utils');
 
 // ── Location -> funId mapping (unchanged from the old script) ─────────────
 const LOCATION_FUN_MAP = {
@@ -260,7 +261,57 @@ async function findLockerForOrder(funId, activeLockers) {
   };
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────
+// ── Instant Pickup capacity (consumed from the nightly budget) ─────────
+// Reads/decrements the count compute_instant_capacity.js wrote the
+// night before. If no entry exists for today (e.g. the nightly job
+// hasn't run yet), falls back to unlimited — logged clearly so it's
+// never a silent gap.
+const CAPACITY_FILE = path.join(__dirname, 'pickup_codes', 'instant_capacity.json');
+
+function loadCapacityFile() {
+  if (!fs.existsSync(CAPACITY_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(CAPACITY_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveCapacityFile(data) {
+  fs.mkdirSync(path.dirname(CAPACITY_FILE), { recursive: true });
+  fs.writeFileSync(CAPACITY_FILE, JSON.stringify(data, null, 2));
+}
+
+function todayDateKey() {
+  return formatDateForBucket(nowInMYT());
+}
+
+// Returns { allowed: bool, reason: string } — checks AND decrements
+// atomically (reads, checks, writes back) so multiple Instant orders in
+// the same batch consume budget correctly one after another.
+function consumeInstantCapacity(funId) {
+  const dateKey = todayDateKey();
+  const data = loadCapacityFile();
+
+  if (!data[dateKey] || data[dateKey][funId] === undefined) {
+    console.log(
+      `⚠️  No Instant Pickup budget computed for ${dateKey}, funId ${funId} — ` +
+        `nightly job may not have run yet. Falling back to unlimited for now.`
+    );
+    return { allowed: true, reason: 'no-budget-set-fallback-unlimited' };
+  }
+
+  const remaining = data[dateKey][funId];
+  if (remaining <= 0) {
+    return { allowed: false, reason: `Instant Pickup budget exhausted for ${dateKey} (funId ${funId})` };
+  }
+
+  data[dateKey][funId] = remaining - 1;
+  saveCapacityFile(data);
+  return { allowed: true, reason: `consumed 1, ${remaining - 1} remaining` };
+}
+
+
 async function main() {
   try {
     if (!process.env.XZY_APP_ID || !process.env.XZY_SECRET_KEY) {
@@ -288,6 +339,14 @@ async function main() {
       try {
         const funId = resolveFunId(order.order_location);
         console.log(`📦 funId=${funId} (resolved from "${order.order_location}")`);
+
+        if (order.pickup_type === 'Instant Pickup') {
+          const capacityCheck = consumeInstantCapacity(funId);
+          console.log(`⚡ Instant Pickup capacity check: ${capacityCheck.reason}`);
+          if (!capacityCheck.allowed) {
+            throw new Error(capacityCheck.reason);
+          }
+        }
 
         await cleanStaleTrackerEntries(funId);
         const activeLockers = loadActiveLockers();
