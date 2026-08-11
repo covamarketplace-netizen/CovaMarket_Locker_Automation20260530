@@ -59,6 +59,7 @@ function loadBucket(file) {
 }
 
 function saveBucket(file, orders) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(orders, null, 2));
 }
 
