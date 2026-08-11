@@ -42,12 +42,18 @@ const CONFIG = {
 // generate_pickup_code.js — used to phrase the collection note more
 // naturally ("today" instead of "by Tue, 11 Aug 2026").
 const isInstantPickup = CONFIG.pickupTime === 'Available Now';
+
+// For Advance Pickup, pickupTime is a range like "7:00 AM - 12:00 PM" or
+// "1:00 PM - 7:00 PM" — pull out just the end time for the cutoff note.
+const slotEndTime = CONFIG.pickupTime.includes(' - ') ? CONFIG.pickupTime.split(' - ')[1].trim() : '';
+const cutoffSuffix = slotEndTime ? `, ${slotEndTime}` : '';
+
 const collectByText = isInstantPickup
   ? 'Please collect your order today.'
-  : `Please collect your order by <strong>${escHtml(CONFIG.pickupDate)}</strong>.`;
+  : `Please collect your order by <strong>${escHtml(CONFIG.pickupDate)}${escHtml(cutoffSuffix)}</strong>.`;
 const collectByTextPlain = isInstantPickup
   ? 'Please collect your order today.'
-  : `Please collect your order by ${CONFIG.pickupDate}.`;
+  : `Please collect your order by ${CONFIG.pickupDate}${cutoffSuffix}.`;
 
 // ── Build email HTML ──────────────────────────────────────────────────────────
 async function buildEmail() {
