@@ -1,0 +1,49 @@
+name: Assign Lockers For Tomorrow
+
+# Runs daily at 21:30 MYT (13:30 UTC) — same timing as the Instant
+# Pickup capacity calc and expiry report, right after the 9PM cutoff.
+# Assigns a SPECIFIC locker to every order already queued for tomorrow,
+# and emails the full plan.
+on:
+  schedule:
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: assign-lockers-tomorrow
+  cancel-in-progress: false
+
+jobs:
+  assign-lockers:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Assign lockers for tomorrow
+        env:
+          XZY_APP_ID: ${{ secrets.XZY_APP_ID }}
+          XZY_SECRET_KEY: ${{ secrets.XZY_SECRET_KEY }}
+          GMAIL_USER: covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ADMIN_ALERT_EMAIL: ${{ secrets.ADMIN_ALERT_EMAIL }}
+        run: node assign_lockers_for_tomorrow.js
+
+      - name: Commit updated bucket files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f advance_queue/
+          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: assign lockers for tomorrow [skip ci]"
+          git push
