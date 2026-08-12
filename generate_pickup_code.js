@@ -250,25 +250,67 @@ async function useAssignedLocker(order, activeLockers) {
 }
 
 
+const QUEUE_DIR = path.join(__dirname, 'advance_queue');
+const LOCATIONS = { 715: 'LRT Sentul Timur', 716: 'LRT Lembah Subang' };
+
+// Any locker pre-assigned to a STILL-PENDING advance order today (order
+// is still sitting in the bucket file — a successful release removes it
+// via trim_bucket_after_wave.js) counts as reserved, even though it
+// isn't in active_lockers.json yet. This closes the gap where an early
+// collection wouldn't free up an equivalent slot for Instant Pickup: the
+// live check now sees the TRUE reserved set at any moment, not just
+// what's already been formally released.
+function getAdvanceReservedRoadIds(funId) {
+  const locationName = LOCATIONS[funId];
+  const dateKey = todayDateKey();
+  const reserved = new Set();
+
+  for (const slot of [1, 2]) {
+    const file = path.join(QUEUE_DIR, `order_details_${dateKey}_slot${slot}.json`);
+    if (!fs.existsSync(file)) continue;
+    try {
+      const orders = JSON.parse(fs.readFileSync(file, 'utf8'));
+      for (const o of orders) {
+        if (o.order_location === locationName && o.assignedRoadId) {
+          reserved.add(String(o.assignedRoadId));
+        }
+      }
+    } catch {
+      // malformed/unreadable bucket file — skip, don't crash order processing
+    }
+  }
+
+  return reserved;
+}
+
 // anywhere in this file — if nothing is stocked, this fails clearly and
 // tells you to restock via XZY's H5 mobile page (their own recommended
 // method), instead of silently attempting an auto-replenish that would
 // require a token that can expire without warning.
-async function findLockerForOrder(funId, activeLockers) {
+//
+// extraExcludedRoadIds: used by Instant Pickup to also avoid lockers
+// already pre-assigned (but not yet released) to an Advance order —
+// see getAdvanceReservedRoadIds() below.
+async function findLockerForOrder(funId, activeLockers, extraExcludedRoadIds = new Set()) {
   const channels = await getRoodById(funId);
   console.log(`📦 Total channels for funId ${funId}: ${channels.length}`);
 
   const activeRoadIds = new Set(Object.keys(activeLockers));
 
   channels.forEach((ch) => {
+    const advanceReserved = extraExcludedRoadIds.has(String(ch.roadId));
     console.log(
       `  ${ch.roadRow}-${ch.roadColumn} | roadId=${ch.roadId} | goodsId=${ch.goodsId} | ` +
-        `stock=${ch.roadStock} | tracked=${activeRoadIds.has(String(ch.roadId))}`
+        `stock=${ch.roadStock} | tracked=${activeRoadIds.has(String(ch.roadId))}` +
+        (advanceReserved ? ' | advance-reserved=true' : '')
     );
   });
 
   const stocked = channels.filter(
-    (ch) => (ch.roadStock ?? 0) > 0 && !activeRoadIds.has(String(ch.roadId))
+    (ch) =>
+      (ch.roadStock ?? 0) > 0 &&
+      !activeRoadIds.has(String(ch.roadId)) &&
+      !extraExcludedRoadIds.has(String(ch.roadId))
   );
 
   if (!stocked.length) {
@@ -396,7 +438,11 @@ async function main() {
           console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — targeting it specifically, no substitution.`);
           locker = await useAssignedLocker(order, activeLockers);
         } else {
-          locker = await findLockerForOrder(funId, activeLockers);
+          const advanceReserved = getAdvanceReservedRoadIds(funId);
+          if (advanceReserved.size > 0) {
+            console.log(`🔒 ${advanceReserved.size} locker(s) reserved for still-pending advance orders today — excluding from Instant Pickup selection.`);
+          }
+          locker = await findLockerForOrder(funId, activeLockers, advanceReserved);
         }
         console.log(`✅ Selected locker ${locker.lockerLabel} (roadId=${locker.roadId}, goodsId=${locker.goodsId})`);
 
