@@ -1,14 +1,17 @@
 name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
 
-# Fires at 12:20 PM MYT (04:20 UTC, same calendar day). Slot 1 now runs
-# 7AM-12PM, so by 12:20 there's a genuine 20-minute buffer
-# after slot 1's window fully closed — any slot-1 no-show is already
-# confirmed by then via the same cleanStaleTrackerEntries check
-# generate_pickup_code.js always runs. No more racing against an
-# in-progress slot, so this is a single release again (no wave 2 needed).
+# Fires at 12:07 PM MYT (04:07 UTC, same calendar day). Slot 1 runs
+# 7AM-12PM, so by 12:07 there's already enough buffer after its close —
+# any slot-1 no-show is confirmed by then via the same
+# cleanStaleTrackerEntries check generate_pickup_code.js always runs.
+# Deliberately NOT a round number like 12:00/12:20/12:30 — GitHub's
+# scheduled triggers can run meaningfully late under load (observed:
+# 33+ minutes on a round-hour trigger), and delays are worse at times
+# many other repos also schedule jobs. This also leaves ~53 minutes of
+# margin before slot 2's 1PM start instead of 40, in case of delay.
 on:
   schedule:
-    - cron: '20 4 * * *'
+    - cron: '7 4 * * *'
   workflow_dispatch:
 
 concurrency:
