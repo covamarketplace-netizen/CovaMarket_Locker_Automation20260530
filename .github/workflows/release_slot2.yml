@@ -1,17 +1,22 @@
 name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
 
-# Fires at 12:07 PM MYT (04:07 UTC, same calendar day). Slot 1 runs
-# 7AM-12PM, so by 12:07 there's already enough buffer after its close —
-# any slot-1 no-show is confirmed by then via the same
-# cleanStaleTrackerEntries check generate_pickup_code.js always runs.
-# Deliberately NOT a round number like 12:00/12:20/12:30 — GitHub's
-# scheduled triggers can run meaningfully late under load (observed:
-# 33+ minutes on a round-hour trigger), and delays are worse at times
-# many other repos also schedule jobs. This also leaves ~53 minutes of
-# margin before slot 2's 1PM start instead of 40, in case of delay.
+# Fires THREE times — 12:07 PM MYT (primary), 12:35 PM and 12:50 PM
+# (automatic backups). Slot 1 runs 7AM-12PM, so by 12:07 there's already
+# enough buffer after its close for the no-show check to be accurate.
+#
+# Multiple triggers are safe: a successful release empties today's
+# bucket, so if an earlier trigger already succeeded, later ones just
+# find nothing left to do and exit cleanly. This exists because GitHub's
+# scheduled triggers can run meaningfully late under load — observed on
+# this exact workflow: 33 minutes late on one run, 96 minutes late
+# (running INTO slot 2's own 1PM window) on another. Spreading multiple
+# trigger times means one of them picks up the actual release
+# automatically, without needing a manual re-trigger or an alert.
 on:
   schedule:
     - cron: '7 4 * * *'
+    - cron: '35 4 * * *'
+    - cron: '50 4 * * *'
   workflow_dispatch:
 
 concurrency:
