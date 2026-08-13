@@ -1,22 +1,21 @@
 name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
 
-# Fires THREE times — 12:07 PM MYT (primary), 12:35 PM and 12:50 PM
-# (automatic backups). Slot 1 runs 7AM-12PM, so by 12:07 there's already
-# enough buffer after its close for the no-show check to be accurate.
+# Fires at 12:07 PM MYT (04:07 UTC, same calendar day). Slot 1 runs
+# 7AM-12PM, so by 12:07 there's already enough buffer after its close
+# for the no-show check to be accurate.
 #
-# Multiple triggers are safe: a successful release empties today's
-# bucket, so if an earlier trigger already succeeded, later ones just
-# find nothing left to do and exit cleanly. This exists because GitHub's
-# scheduled triggers can run meaningfully late under load — observed on
-# this exact workflow: 33 minutes late on one run, 96 minutes late
-# (running INTO slot 2's own 1PM window) on another. Spreading multiple
-# trigger times means one of them picks up the actual release
-# automatically, without needing a manual re-trigger or an alert.
+# Reliability note: GitHub's own scheduled triggers have been observed
+# running significantly late (33 minutes on one run, 96 minutes —
+# INTO slot 2's own 1PM window — on another). Rather than stacking
+# multiple GitHub-side trigger times to compensate, an external AWS
+# EventBridge Scheduler rule now calls this workflow's workflow_dispatch
+# trigger directly at the same time, bypassing GitHub's scheduling queue
+# entirely. This GitHub-side schedule stays as a backup layer — if both
+# happen to fire, that's safe (a successful release empties today's
+# bucket, so whichever fires second just finds nothing left to do).
 on:
   schedule:
     - cron: '7 4 * * *'
-    - cron: '35 4 * * *'
-    - cron: '50 4 * * *'
   workflow_dispatch:
 
 concurrency:
