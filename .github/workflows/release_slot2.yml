@@ -149,4 +149,20 @@ jobs:
           git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
           if [ -d advance_queue ]; then git add -f advance_queue/; fi
           git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: release slot 2 pickup codes [skip ci]"
-          git push
+          # Retry push a few times — GitHub occasionally returns a
+          # transient "Internal Server Error" on the remote side (not
+          # caused by our data or logic). A short retry usually clears it
+          # without needing manual re-triggering.
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "✅ Pushed successfully (attempt $attempt)"
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "❌ Push failed after 3 attempts — needs manual attention"
+              exit 1
+            fi
+            echo "⚠️  Push attempt $attempt failed, retrying in 5s..."
+            sleep 5
+            git pull --rebase
+          done
