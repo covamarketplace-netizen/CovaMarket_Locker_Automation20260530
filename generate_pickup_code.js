@@ -380,21 +380,35 @@ async function findInstantLocker(funId, activeLockers) {
   const slotNum = currentSlotNumber();
   const slotKey = `slot${slotNum}`;
 
-  if (!fs.existsSync(ELIGIBLE_LOCKERS_FILE)) {
-    throw new Error(
-      `No instant-eligible locker list found for today — assign_lockers_for_tomorrow.js may not have run yet.`
+  // Case 1: the file/entry genuinely doesn't exist — assign_lockers_for_
+  // tomorrow.js never ran (or failed) for today. This is a system gap,
+  // not a real "sold out" state — fall back to the old resilient
+  // dynamic search rather than blocking Instant Pickup entirely.
+  let eligibleData = null;
+  if (fs.existsSync(ELIGIBLE_LOCKERS_FILE)) {
+    try {
+      eligibleData = JSON.parse(fs.readFileSync(ELIGIBLE_LOCKERS_FILE, 'utf8'));
+    } catch {
+      eligibleData = null;
+    }
+  }
+
+  const eligibleRoadIds = eligibleData?.[dateKey]?.[funId]?.[slotKey];
+
+  if (eligibleRoadIds === undefined) {
+    console.log(
+      `⚠️  No instant-eligible list found for ${dateKey}, funId ${funId}, ${slotKey} — ` +
+        `assign_lockers_for_tomorrow.js may not have run for today. Falling back to general search.`
     );
+    const advanceReserved = getAdvanceReservedRoadIds(funId);
+    return await findLockerForOrder(funId, activeLockers, advanceReserved);
   }
 
-  let eligibleData;
-  try {
-    eligibleData = JSON.parse(fs.readFileSync(ELIGIBLE_LOCKERS_FILE, 'utf8'));
-  } catch {
-    throw new Error(`instant_eligible_lockers.json is unreadable/corrupt.`);
-  }
-
-  const eligibleRoadIds = eligibleData[dateKey]?.[funId]?.[slotKey];
-  if (!eligibleRoadIds || eligibleRoadIds.length === 0) {
+  // Case 2: the entry DOES exist, but is a genuinely empty list — this
+  // means the assignment ran and correctly determined every locker for
+  // this slot went to Advance orders. This IS a real "no instant
+  // capacity" state and should correctly reject.
+  if (eligibleRoadIds.length === 0) {
     throw new Error(
       `No instant-eligible lockers designated for ${dateKey}, funId ${funId}, ${slotKey} — ` +
         `all lockers were committed to advance orders for this slot.`
