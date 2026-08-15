@@ -160,9 +160,16 @@ async function main() {
   const slot2Orders = loadBucket(slot2File);
 
   const allPlanLines = [];
+  // Fixed instant-eligible locker list, per location per slot — this is
+  // the authoritative set consumeInstantCapacity/findLockerForOrder must
+  // draw from. An advance locker that frees up early during a slot does
+  // NOT get added to this — staff need a stable, known set to pre-stock
+  // against, not one that silently grows through the day.
+  const instantEligible = {};
 
   for (const [funIdStr, locationName] of Object.entries(LOCATIONS)) {
     const funId = Number(funIdStr);
+    instantEligible[funId] = { slot1: [], slot2: [] };
 
     let channels = [];
     try {
@@ -186,9 +193,13 @@ async function main() {
     // Leftover channels per slot — computed independently, since slot 1
     // and slot 2 each get their own full assignment sequence and may
     // reuse the same physical locker numbers later in the day.
-    for (const [slotLabel, slotOrders] of [['Slot 1', slot1ForLocation], ['Slot 2', slot2ForLocation]]) {
+    for (const [slotKey, slotLabel, slotOrders] of [
+      ['slot1', 'Slot 1', slot1ForLocation],
+      ['slot2', 'Slot 2', slot2ForLocation],
+    ]) {
       const usedCount = Math.min(slotOrders.length, channels.length);
       const leftover = channels.slice(usedCount);
+      instantEligible[funId][slotKey] = leftover.map((ch) => ch.roadId);
       if (leftover.length === 0) continue;
 
       allPlanLines.push(`${slotLabel} | ${locationName} | AVAILABLE FOR INSTANT PICKUP (${leftover.length}):`);
@@ -198,6 +209,22 @@ async function main() {
       }
     }
   }
+
+  // Save the fixed eligible-locker list for today, so generate_pickup_code.js
+  // can restrict Instant Pickup selection to exactly this set.
+  const eligibleFile = path.join(__dirname, 'pickup_codes', 'instant_eligible_lockers.json');
+  let eligibleData = {};
+  if (fs.existsSync(eligibleFile)) {
+    try {
+      eligibleData = JSON.parse(fs.readFileSync(eligibleFile, 'utf8'));
+    } catch {
+      eligibleData = {};
+    }
+  }
+  eligibleData[dateKey] = instantEligible;
+  fs.mkdirSync(path.dirname(eligibleFile), { recursive: true });
+  fs.writeFileSync(eligibleFile, JSON.stringify(eligibleData, null, 2));
+  console.log(`✅ Saved instant-eligible locker list to ${eligibleFile}`);
 
   // assignSequentially mutates the order objects it's given in-place.
   // Since filter() returns new arrays but keeps the SAME object

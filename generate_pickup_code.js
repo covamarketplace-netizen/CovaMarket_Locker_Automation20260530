@@ -366,6 +366,65 @@ function currentSlotNumber() {
   return myt.getUTCHours() < 12 ? 1 : 2;
 }
 
+const ELIGIBLE_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_eligible_lockers.json');
+
+// Instant Pickup may ONLY use lockers that were specifically designated
+// as leftover/instant-eligible in last night's 9:30 PM plan for the
+// CURRENT slot — a fixed, known set. An advance locker that frees up
+// early during the day does NOT get added to this: staff need a stable
+// set to pre-stock against, not one that silently grows through the
+// day. This resets fresh every slot, since slot1 and slot2 each got
+// their own independent assignment last night.
+async function findInstantLocker(funId, activeLockers) {
+  const dateKey = todayDateKey();
+  const slotNum = currentSlotNumber();
+  const slotKey = `slot${slotNum}`;
+
+  if (!fs.existsSync(ELIGIBLE_LOCKERS_FILE)) {
+    throw new Error(
+      `No instant-eligible locker list found for today — assign_lockers_for_tomorrow.js may not have run yet.`
+    );
+  }
+
+  let eligibleData;
+  try {
+    eligibleData = JSON.parse(fs.readFileSync(ELIGIBLE_LOCKERS_FILE, 'utf8'));
+  } catch {
+    throw new Error(`instant_eligible_lockers.json is unreadable/corrupt.`);
+  }
+
+  const eligibleRoadIds = eligibleData[dateKey]?.[funId]?.[slotKey];
+  if (!eligibleRoadIds || eligibleRoadIds.length === 0) {
+    throw new Error(
+      `No instant-eligible lockers designated for ${dateKey}, funId ${funId}, ${slotKey} — ` +
+        `all lockers were committed to advance orders for this slot.`
+    );
+  }
+
+  const channels = await getRoodById(funId);
+  const activeRoadIds = new Set(Object.keys(activeLockers));
+
+  for (const roadId of eligibleRoadIds) {
+    if (activeRoadIds.has(String(roadId))) continue; // already used by an earlier instant order this slot
+    const channel = channels.find((ch) => ch.roadId === roadId);
+    if (!channel) continue;
+    if ((channel.roadStock ?? 0) <= 0) continue;
+
+    const label = await resolveLockerLabel(funId, channel);
+    return {
+      goodsId: channel.goodsId,
+      roadId: channel.roadId,
+      roadRow: channel.roadRow,
+      roadColumn: channel.roadColumn,
+      lockerLabel: label,
+    };
+  }
+
+  throw new Error(
+    `All ${eligibleRoadIds.length} designated instant locker(s) for ${dateKey} ${slotKey} (funId ${funId}) are already in use.`
+  );
+}
+
 // Returns { allowed: bool, reason: string } — checks AND decrements
 // atomically (reads, checks, writes back) so multiple Instant orders in
 // the same batch consume budget correctly one after another.
@@ -434,14 +493,19 @@ async function main() {
         const activeLockers = loadActiveLockers();
 
         let locker;
-        if (order.assignedRoadId) {
+        if (order.pickup_type === 'Instant Pickup') {
+          // Restricted to the fixed set designated at 9:30 PM for the
+          // CURRENT slot — never any arbitrary free locker.
+          locker = await findInstantLocker(funId, activeLockers);
+        } else if (order.assignedRoadId) {
           console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — targeting it specifically, no substitution.`);
           locker = await useAssignedLocker(order, activeLockers);
         } else {
+          // Advance order missing a pre-assignment (e.g. the 9:30 PM job
+          // didn't run) — safety fallback to a general search, still
+          // avoiding anything reserved by OTHER pending advance orders.
+          console.log(`⚠️  Advance order has no pre-assignment — falling back to general locker search.`);
           const advanceReserved = getAdvanceReservedRoadIds(funId);
-          if (advanceReserved.size > 0) {
-            console.log(`🔒 ${advanceReserved.size} locker(s) reserved for still-pending advance orders today — excluding from Instant Pickup selection.`);
-          }
           locker = await findLockerForOrder(funId, activeLockers, advanceReserved);
         }
         console.log(`✅ Selected locker ${locker.lockerLabel} (roadId=${locker.roadId}, goodsId=${locker.goodsId})`);
