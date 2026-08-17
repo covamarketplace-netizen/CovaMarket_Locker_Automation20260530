@@ -1,10 +1,10 @@
 name: Report Expired Pickup Codes
 
-# Runs daily at 21:30 MYT (13:30 UTC), read-only — no auto-cancel, no JWT.
+# Runs daily at 23:00 MYT (13:30 UTC), read-only — no auto-cancel, no JWT.
 # Emails a checklist for staff to action manually.
 on:
   schedule:
-    - cron: '30 13 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:

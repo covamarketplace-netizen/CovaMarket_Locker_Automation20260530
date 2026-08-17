@@ -33,9 +33,6 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install dependencies
-        run: npm install qrcode
-
       - name: Show current active_lockers.json
         run: |
           echo "📋 Current active_lockers.json:"
@@ -230,6 +227,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
+          if [ -f pickup_codes/instant_capacity.json ]; then git add -f pickup_codes/instant_capacity.json; fi
+          if [ -f pickup_codes/instant_lockers_used.json ]; then git add -f pickup_codes/instant_lockers_used.json; fi
           if [ -d advance_queue ]; then git add -f advance_queue/; fi
 
           echo "📋 Git status after add:"

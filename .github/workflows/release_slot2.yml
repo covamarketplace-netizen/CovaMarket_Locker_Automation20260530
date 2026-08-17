@@ -1,12 +1,12 @@
-name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
+name: Release Advance Pickup Codes - Slot 2 (2PM-10PM)
 
-# Fires at 12:07 PM MYT (04:07 UTC, same calendar day). Slot 1 runs
-# 7AM-12PM, so by 12:07 there's already enough buffer after its close
+# Fires at 1:20 PM MYT (05:20 UTC, same calendar day). Slot 1 runs
+# 9AM-1PM, so by 1:20 there's already enough buffer after its close
 # for the no-show check to be accurate.
 #
 # Reliability note: GitHub's own scheduled triggers have been observed
 # running significantly late (33 minutes on one run, 96 minutes —
-# INTO slot 2's own 1PM window — on another). Rather than stacking
+# INTO slot 2's own start window — on another). Rather than stacking
 # multiple GitHub-side trigger times to compensate, an external AWS
 # EventBridge Scheduler rule now calls this workflow's workflow_dispatch
 # trigger directly at the same time, bypassing GitHub's scheduling queue
@@ -15,7 +15,7 @@ name: Release Advance Pickup Codes - Slot 2 (1PM-7PM)
 # bucket, so whichever fires second just finds nothing left to do).
 on:
   schedule:
-    - cron: '7 4 * * *'
+    - cron: '20 5 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -37,9 +37,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-
-      - name: Install dependencies
-        run: npm install qrcode
 
       - name: Resolve today's slot 2 bucket
         id: bucket

@@ -1,12 +1,12 @@
 name: Assign Lockers For Tomorrow
 
-# Runs daily at 21:30 MYT (13:30 UTC) — same timing as the Instant
+# Runs daily at 23:00 MYT (13:30 UTC) — same timing as the Instant
 # Pickup capacity calc and expiry report, right after the 9PM cutoff.
 # Assigns a SPECIFIC locker to every order already queued for tomorrow,
 # and emails the full plan.
 on:
   schedule:
-    - cron: '30 13 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 concurrency:

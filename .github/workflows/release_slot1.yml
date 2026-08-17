@@ -1,11 +1,11 @@
-name: Release Advance Pickup Codes - Slot 1 (7AM-12PM)
+name: Release Advance Pickup Codes - Slot 1 (9AM-1PM)
 
-# Fires at 5:00 AM MYT (2 hours before slot 1's 7AM start). Since
-# MYT = UTC+8, that's 21:00 UTC the PREVIOUS calendar day — verified
+# Fires at 6:00 AM MYT (3 hours before slot 1's 9AM start). Since
+# MYT = UTC+8, that's 22:00 UTC the PREVIOUS calendar day — verified
 # before writing this.
 on:
   schedule:
-    - cron: '0 21 * * *'
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -27,9 +27,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-
-      - name: Install dependencies
-        run: npm install qrcode
 
       - name: Resolve today's slot 1 bucket
         id: bucket

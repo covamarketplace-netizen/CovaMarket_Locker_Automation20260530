@@ -1,10 +1,10 @@
 name: Compute Instant Pickup Capacity
 
-# Runs daily at 21:30 MYT (13:30 UTC) — same timing as the expired-pickup
+# Runs daily at 23:00 MYT (13:30 UTC) — same timing as the expired-pickup
 # report, right after the 9PM advance-booking cutoff for tomorrow.
 on:
   schedule:
-    - cron: '30 13 * * *'
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 concurrency:
