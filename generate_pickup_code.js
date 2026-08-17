@@ -358,12 +358,12 @@ function todayDateKey() {
 }
 
 // Instant Pickup draws from whichever slot's pool is "current" right now:
-// before 12PM MYT -> slot1's pool, 12PM onward (including the 12-1PM gap
-// and all of the afternoon) -> slot2's pool. Matches the same boundary
-// the slot1/slot2 advance releases use.
+// before 1PM MYT -> slot1's pool, 1PM onward (including the 1-2PM gap
+// and all of the evening) -> slot2's pool. Matches the boundary where
+// slot1's window (9AM-1PM) actually closes, not slot2's later start.
 function currentSlotNumber() {
   const myt = nowInMYT();
-  return myt.getUTCHours() < 12 ? 1 : 2;
+  return myt.getUTCHours() < 13 ? 1 : 2;
 }
 
 const ELIGIBLE_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_eligible_lockers.json');
@@ -375,6 +375,29 @@ const ELIGIBLE_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_elig
 // set to pre-stock against, not one that silently grows through the
 // day. This resets fresh every slot, since slot1 and slot2 each got
 // their own independent assignment last night.
+const USED_INSTANT_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_lockers_used.json');
+
+function loadUsedInstantLockers() {
+  if (!fs.existsSync(USED_INSTANT_LOCKERS_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(USED_INSTANT_LOCKERS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function markInstantLockerUsed(dateKey, funId, slotKey, roadId) {
+  const data = loadUsedInstantLockers();
+  data[dateKey] = data[dateKey] || {};
+  data[dateKey][funId] = data[dateKey][funId] || {};
+  data[dateKey][funId][slotKey] = data[dateKey][funId][slotKey] || [];
+  if (!data[dateKey][funId][slotKey].includes(roadId)) {
+    data[dateKey][funId][slotKey].push(roadId);
+  }
+  fs.mkdirSync(path.dirname(USED_INSTANT_LOCKERS_FILE), { recursive: true });
+  fs.writeFileSync(USED_INSTANT_LOCKERS_FILE, JSON.stringify(data, null, 2));
+}
+
 async function findInstantLocker(funId, activeLockers) {
   const dateKey = todayDateKey();
   const slotNum = currentSlotNumber();
@@ -418,13 +441,22 @@ async function findInstantLocker(funId, activeLockers) {
   const channels = await getRoodById(funId);
   const activeRoadIds = new Set(Object.keys(activeLockers));
 
+  // Once opened for ANY instant order this slot, a locker is retired for
+  // the rest of that slot — even after the customer collects. Staff
+  // stock it once per slot; it should never need re-stocking mid-slot
+  // for a second, different customer.
+  const usedData = loadUsedInstantLockers();
+  const usedThisSlot = new Set(usedData[dateKey]?.[funId]?.[slotKey] || []);
+
   for (const roadId of eligibleRoadIds) {
-    if (activeRoadIds.has(String(roadId))) continue; // already used by an earlier instant order this slot
+    if (usedThisSlot.has(roadId)) continue; // already opened once this slot — permanently retired
+    if (activeRoadIds.has(String(roadId))) continue; // currently tracked (pending, not yet collected)
     const channel = channels.find((ch) => ch.roadId === roadId);
     if (!channel) continue;
     if ((channel.roadStock ?? 0) <= 0) continue;
 
     const label = await resolveLockerLabel(funId, channel);
+    markInstantLockerUsed(dateKey, funId, slotKey, roadId);
     return {
       goodsId: channel.goodsId,
       roadId: channel.roadId,
@@ -435,7 +467,7 @@ async function findInstantLocker(funId, activeLockers) {
   }
 
   throw new Error(
-    `All ${eligibleRoadIds.length} designated instant locker(s) for ${dateKey} ${slotKey} (funId ${funId}) are already in use.`
+    `All ${eligibleRoadIds.length} designated instant locker(s) for ${dateKey} ${slotKey} (funId ${funId}) have already been used this slot.`
   );
 }
 
@@ -495,22 +527,18 @@ async function main() {
         const funId = resolveFunId(order.order_location);
         console.log(`📦 funId=${funId} (resolved from "${order.order_location}")`);
 
-        if (order.pickup_type === 'Instant Pickup') {
-          const capacityCheck = consumeInstantCapacity(funId);
-          console.log(`⚡ Instant Pickup capacity check: ${capacityCheck.reason}`);
-          if (!capacityCheck.allowed) {
-            throw new Error(capacityCheck.reason);
-          }
-        }
-
         await cleanStaleTrackerEntries(funId);
         const activeLockers = loadActiveLockers();
 
         let locker;
         if (order.pickup_type === 'Instant Pickup') {
           // Restricted to the fixed set designated at 9:30 PM for the
-          // CURRENT slot — never any arbitrary free locker.
+          // CURRENT slot — never any arbitrary free locker. Find the
+          // locker FIRST, then consume capacity only on success — avoids
+          // wasting a budget slot on an order that ultimately fails.
           locker = await findInstantLocker(funId, activeLockers);
+          const capacityCheck = consumeInstantCapacity(funId);
+          console.log(`⚡ Instant Pickup capacity check: ${capacityCheck.reason}`);
         } else if (order.assignedRoadId) {
           console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — targeting it specifically, no substitution.`);
           locker = await useAssignedLocker(order, activeLockers);

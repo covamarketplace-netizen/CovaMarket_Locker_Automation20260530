@@ -32,11 +32,11 @@ function formatDateForBucket(date) {
 // like "7:00 AM - 12:00 PM". Returns null if unrecognized.
 function slotFromPickupTime(pickupTime) {
   if (!pickupTime) return null;
-  // startsWith, not includes — a range like "9:00 AM - 1:00 PM" (old
+  // startsWith, not includes — a range like "7:00 AM - 1:00 PM" (old
   // format, no longer valid) isn't either current slot, but a loose
-  // .includes() check could still false-match it against '1:00 PM'.
-  if (pickupTime.startsWith('7:00 AM')) return 1;
-  if (pickupTime.startsWith('1:00 PM')) return 2;
+  // .includes() check could still false-match it against a substring.
+  if (pickupTime.startsWith('9:00 AM')) return 1;
+  if (pickupTime.startsWith('2:00 PM')) return 2;
   return null;
 }
 

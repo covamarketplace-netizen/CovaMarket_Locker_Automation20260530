@@ -23,7 +23,6 @@
 const https = require('https');
 const tls   = require('tls');
 const net   = require('net');
-const QRCode = require('qrcode');
 
 const CONFIG = {
   gmailUser:     process.env.GMAIL_USER       || 'covamarketplace@gmail.com',
@@ -58,14 +57,6 @@ const collectByTextPlain = isInstantPickup
 // ── Build email HTML ──────────────────────────────────────────────────────────
 async function buildEmail() {
   const subject = `Your CovaMarket Order is Ready for Pickup! 🎉 (${CONFIG.orderId})`;
-
-  // Generate QR code as PNG buffer — will be attached as inline CID image
-  const qrBuffer = await QRCode.toBuffer(CONFIG.pickCode, {
-    width:  200,
-    margin: 2,
-    color: { dark: '#1a1a2e', light: '#ffffff' },
-  });
-  const qrBase64 = qrBuffer.toString('base64');
 
   const html = `<!DOCTYPE html>
 <html>
@@ -133,10 +124,6 @@ async function buildEmail() {
       <div style="margin-top:12px;">
         <span class="locker-badge">Locker ${escHtml(CONFIG.locker)}</span>
       </div>
-      <div style="margin-top:18px;">
-        <div style="color:#aaa; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:8px;">Scan to enter code</div>
-        <img src="cid:qrcode@covamarket" alt="QR Code for ${escHtml(CONFIG.pickCode)}" width="160" height="160" style="border-radius:8px;" />
-      </div>
     </div>
 
     <div class="notes">
@@ -183,7 +170,7 @@ Questions? Email us: covamarketplace@gmail.com
 
 Thank you for shopping with CovaMarket!`;
 
-  return { subject, html, text, qrBase64 };
+  return { subject, html, text };
 }
 
 function escHtml(str) {
@@ -199,20 +186,18 @@ function base64(str) {
   return Buffer.from(str).toString('base64');
 }
 
-function buildMimeMessage({ subject, html, text, qrBase64 }) {
-  const outerBoundary = `----=_Outer_${Date.now()}`;
-  const altBoundary   = `----=_Alt_${Date.now() + 1}`;
-  const from          = `CovaMarket <${CONFIG.gmailUser}>`;
-  const to            = CONFIG.toEmail;
+function buildMimeMessage({ subject, html, text }) {
+  const altBoundary = `----=_Alt_${Date.now()}`;
+  const from        = `CovaMarket <${CONFIG.gmailUser}>`;
+  const to          = CONFIG.toEmail;
 
   const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
-  const htmlB64  = Buffer.from(html, 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
-  const textB64  = Buffer.from(text, 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
-  const qrChunks = qrBase64.match(/.{1,76}/g).join('\r\n');
+  const htmlB64 = Buffer.from(html, 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
+  const textB64 = Buffer.from(text, 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
 
-  // multipart/related wraps HTML + inline image
-  // multipart/alternative wraps plain text + multipart/related
+  // multipart/alternative wraps plain text + HTML — no inline image
+  // anymore, so no nested multipart/related layer needed.
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
@@ -227,26 +212,12 @@ function buildMimeMessage({ subject, html, text, qrBase64 }) {
     ``,
     textB64,
     ``,
-    // HTML + inline image part
+    // HTML part
     `--${altBoundary}`,
-    `Content-Type: multipart/related; boundary="${outerBoundary}"`,
-    ``,
-    `--${outerBoundary}`,
     `Content-Type: text/html; charset=UTF-8`,
     `Content-Transfer-Encoding: base64`,
     ``,
     htmlB64,
-    ``,
-    // Inline QR image
-    `--${outerBoundary}`,
-    `Content-Type: image/png; name="qrcode.png"`,
-    `Content-Transfer-Encoding: base64`,
-    `Content-Disposition: inline; filename="qrcode.png"`,
-    `Content-ID: <qrcode@covamarket>`,
-    ``,
-    qrChunks,
-    ``,
-    `--${outerBoundary}--`,
     ``,
     `--${altBoundary}--`,
   ];
@@ -337,8 +308,8 @@ async function sendEmail() {
   if (!CONFIG.toEmail)       throw new Error('TO_EMAIL not set');
   if (!CONFIG.pickCode)      throw new Error('PICK_CODE not set');
 
-  const { subject, html, text, qrBase64 } = await buildEmail();
-  const mime = buildMimeMessage({ subject, html, text, qrBase64 });
+  const { subject, html, text } = await buildEmail();
+  const mime = buildMimeMessage({ subject, html, text });
 
   console.log(`📧 Sending email to: ${CONFIG.toEmail}`);
   console.log(`   Subject: ${subject}`);
