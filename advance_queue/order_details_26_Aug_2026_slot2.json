@@ -7,6 +7,11 @@
     "order_location": "LRT Sentul Timur",
     "pickup_type": "Advance Pickup",
     "pickup_date": "Wed, 26 Aug 2026",
-    "pickup_time": "2:00 PM - 10:00 PM"
+    "pickup_time": "2:00 PM - 10:00 PM",
+    "assignedRoadId": 96337,
+    "assignedGoodsId": 6225,
+    "assignedRoadRow": 1,
+    "assignedRoadColumn": 1,
+    "assignedLocker": "1-1"
   }
 ]
