@@ -1,11 +1,11 @@
-name: Release Advance Pickup Codes - Slot 1 (9AM-1PM)
+name: Release Advance Pickup Codes - Slot 1 (9AM-2PM)
 
-# Fires at 6:00 AM MYT (3 hours before slot 1's 9AM start). Since
-# MYT = UTC+8, that's 22:00 UTC the PREVIOUS calendar day — verified
+# Fires at 7:30 AM MYT (1.5 hours before slot 1's 9AM start). Since
+# MYT = UTC+8, that's 23:30 UTC the PREVIOUS calendar day — verified
 # before writing this.
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '30 23 * * *'
   workflow_dispatch:
 
 concurrency:

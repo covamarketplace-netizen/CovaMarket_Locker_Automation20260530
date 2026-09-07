@@ -1,12 +1,12 @@
-name: Release Advance Pickup Codes - Slot 2 (3PM-6:30PM)
+name: Release Advance Pickup Codes - Slot 3 (7:30PM-10PM)
 
-# Fires at 2:30 PM MYT (06:30 UTC, same calendar day). Slot 1 runs
-# 9AM-2PM, so by 2:30 there's already enough buffer after its close
+# Fires at 7:00 PM MYT (11:00 UTC, same calendar day). Slot 2 runs
+# 3PM-6:30PM, so by 7:00 there's already enough buffer after its close
 # for the no-show check to be accurate.
 #
 # Reliability note: GitHub's own scheduled triggers have been observed
 # running significantly late (33 minutes on one run, 96 minutes —
-# INTO slot 2's own start window — on another). Rather than stacking
+# INTO slot 3's own start window — on another). Rather than stacking
 # multiple GitHub-side trigger times to compensate, an external AWS
 # EventBridge Scheduler rule now calls this workflow's workflow_dispatch
 # trigger directly at the same time, bypassing GitHub's scheduling queue
@@ -15,15 +15,15 @@ name: Release Advance Pickup Codes - Slot 2 (3PM-6:30PM)
 # bucket, so whichever fires second just finds nothing left to do).
 on:
   schedule:
-    - cron: '30 6 * * *'
+    - cron: '0 11 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: release-slot-2
+  group: release-slot-3
   cancel-in-progress: false
 
 jobs:
-  release-slot-2:
+  release-slot-3:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -38,13 +38,13 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Resolve today's slot 2 bucket
+      - name: Resolve today's slot 3 bucket
         id: bucket
         run: |
-          FILE=$(node release_slot.js 2)
+          FILE=$(node release_slot.js 3)
           echo "path=$FILE" >> $GITHUB_OUTPUT
           if [ -z "$FILE" ]; then
-            echo "📋 No slot 2 orders waiting for today — nothing to release."
+            echo "📋 No slot 3 orders waiting for today — nothing to release."
           else
             echo "📋 Releasing: $FILE"
           fi
@@ -145,7 +145,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f pickup_codes/active_lockers.json pickup_codes/latest.json
           if [ -d advance_queue ]; then git add -f advance_queue/; fi
-          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: release slot 2 pickup codes [skip ci]"
+          git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: release slot 3 pickup codes [skip ci]"
           # Retry push a few times — GitHub occasionally returns a
           # transient "Internal Server Error" on the remote side (not
           # caused by our data or logic). A short retry usually clears it
