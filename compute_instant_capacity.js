@@ -51,39 +51,41 @@ function saveCapacityFile(data) {
   fs.writeFileSync(CAPACITY_FILE, JSON.stringify(data, null, 2));
 }
 
+const TOTAL_SLOTS = 3;
+
 function main() {
-  // "Tomorrow" relative to MYT right now (9:30 PM MYT -> next calendar day)
+  // "Tomorrow" relative to MYT right now (11PM MYT -> next calendar day)
   const tomorrowMYT = new Date(nowInMYT().getTime() + 24 * 60 * 60 * 1000);
   const dateKey = formatDateForBucket(tomorrowMYT);
 
   console.log(`\n📊 Computing Instant Pickup capacity for ${dateKey}...\n`);
 
-  const slot1File = path.join(QUEUE_DIR, `order_details_${dateKey}_slot1.json`);
-  const slot2File = path.join(QUEUE_DIR, `order_details_${dateKey}_slot2.json`);
-  const slot1Orders = loadBucket(slot1File);
-  const slot2Orders = loadBucket(slot2File);
+  const slotOrders = {};
+  for (let s = 1; s <= TOTAL_SLOTS; s++) {
+    const file = path.join(QUEUE_DIR, `order_details_${dateKey}_slot${s}.json`);
+    slotOrders[s] = loadBucket(file);
+  }
 
   const capacityData = loadCapacityFile();
   capacityData[dateKey] = capacityData[dateKey] || {};
 
   for (const [funId, locationName] of Object.entries(LOCATIONS)) {
-    const slot1Count = slot1Orders.filter((o) => o.order_location === locationName).length;
-    const slot2Count = slot2Orders.filter((o) => o.order_location === locationName).length;
+    const slotCapacity = {};
+    const logParts = [];
 
-    // Each slot has its OWN independent 14-locker cap now (matching
-    // accumulate_advance_orders.js) — NOT a combined total. A slot1
-    // instant order and a slot2 instant order can even end up using the
-    // same physical locker later in the day, same as Advance Pickup does.
-    const slot1Capacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - slot1Count);
-    const slot2Capacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - slot2Count);
+    for (let s = 1; s <= TOTAL_SLOTS; s++) {
+      const count = slotOrders[s].filter((o) => o.order_location === locationName).length;
+      // Each slot has its OWN independent 14-locker cap — NOT a combined
+      // total. A slot's instant order can even end up using the same
+      // physical locker another slot uses later in the day, same as
+      // Advance Pickup does.
+      const capacity = Math.max(0, TOTAL_LOCKERS_PER_LOCATION - count);
+      slotCapacity[`slot${s}`] = capacity;
+      logParts.push(`slot${s}: ${count} advance -> ${capacity} instant`);
+    }
 
-    capacityData[dateKey][funId] = { slot1: slot1Capacity, slot2: slot2Capacity };
-
-    console.log(
-      `${locationName} (funId ${funId}): ` +
-        `slot1: ${slot1Count} advance -> ${slot1Capacity} instant | ` +
-        `slot2: ${slot2Count} advance -> ${slot2Capacity} instant`
-    );
+    capacityData[dateKey][funId] = slotCapacity;
+    console.log(`${locationName} (funId ${funId}): ` + logParts.join(' | '));
   }
 
   saveCapacityFile(capacityData);

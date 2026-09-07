@@ -148,16 +148,21 @@ async function sendPlanEmail(dateKey, planLines) {
   });
 }
 
+const TOTAL_SLOTS = 3;
+
 async function main() {
   const tomorrowMYT = new Date(nowInMYT().getTime() + 24 * 60 * 60 * 1000);
   const dateKey = formatDateForBucket(tomorrowMYT);
 
   console.log(`\n📋 Assigning lockers for ${dateKey}...\n`);
 
-  const slot1File = path.join(QUEUE_DIR, `order_details_${dateKey}_slot1.json`);
-  const slot2File = path.join(QUEUE_DIR, `order_details_${dateKey}_slot2.json`);
-  const slot1Orders = loadBucket(slot1File);
-  const slot2Orders = loadBucket(slot2File);
+  // Load all 3 slot buckets generically.
+  const slotFiles = {};
+  const slotOrdersAll = {};
+  for (let s = 1; s <= TOTAL_SLOTS; s++) {
+    slotFiles[s] = path.join(QUEUE_DIR, `order_details_${dateKey}_slot${s}.json`);
+    slotOrdersAll[s] = loadBucket(slotFiles[s]);
+  }
 
   const allPlanLines = [];
   // Fixed instant-eligible locker list, per location per slot — this is
@@ -169,7 +174,8 @@ async function main() {
 
   for (const [funIdStr, locationName] of Object.entries(LOCATIONS)) {
     const funId = Number(funIdStr);
-    instantEligible[funId] = { slot1: [], slot2: [] };
+    instantEligible[funId] = {};
+    for (let s = 1; s <= TOTAL_SLOTS; s++) instantEligible[funId][`slot${s}`] = [];
 
     let channels = [];
     try {
@@ -179,30 +185,34 @@ async function main() {
       continue;
     }
 
-    const slot1ForLocation = slot1Orders.filter((o) => o.order_location === locationName);
-    const slot2ForLocation = slot2Orders.filter((o) => o.order_location === locationName);
+    const slotOrdersForLocation = {};
+    for (let s = 1; s <= TOTAL_SLOTS; s++) {
+      slotOrdersForLocation[s] = slotOrdersAll[s].filter((o) => o.order_location === locationName);
+      await assignSequentially(funId, slotOrdersForLocation[s], channels);
+    }
 
-    await assignSequentially(funId, slot1ForLocation, channels);
-    await assignSequentially(funId, slot2ForLocation, channels);
+    console.log(
+      `${locationName}: ` +
+        Array.from({ length: TOTAL_SLOTS }, (_, i) => `${slotOrdersForLocation[i + 1].length} slot${i + 1}`).join(', ') +
+        ' assigned'
+    );
 
-    console.log(`${locationName}: ${slot1ForLocation.length} slot1 assigned, ${slot2ForLocation.length} slot2 assigned`);
+    for (let s = 1; s <= TOTAL_SLOTS; s++) {
+      for (const o of slotOrdersForLocation[s]) allPlanLines.push(formatOrderLine(`Slot ${s}`, o));
+    }
 
-    for (const o of slot1ForLocation) allPlanLines.push(formatOrderLine('Slot 1', o));
-    for (const o of slot2ForLocation) allPlanLines.push(formatOrderLine('Slot 2', o));
-
-    // Leftover channels per slot — computed independently, since slot 1
-    // and slot 2 each get their own full assignment sequence and may
-    // reuse the same physical locker numbers later in the day.
-    for (const [slotKey, slotLabel, slotOrders] of [
-      ['slot1', 'Slot 1', slot1ForLocation],
-      ['slot2', 'Slot 2', slot2ForLocation],
-    ]) {
+    // Leftover channels per slot — computed independently, since each
+    // slot gets its own full assignment sequence and may reuse the same
+    // physical locker numbers later in the day.
+    for (let s = 1; s <= TOTAL_SLOTS; s++) {
+      const slotKey = `slot${s}`;
+      const slotOrders = slotOrdersForLocation[s];
       const usedCount = Math.min(slotOrders.length, channels.length);
       const leftover = channels.slice(usedCount);
       instantEligible[funId][slotKey] = leftover.map((ch) => ch.roadId);
       if (leftover.length === 0) continue;
 
-      allPlanLines.push(`${slotLabel} | ${locationName} | AVAILABLE FOR INSTANT PICKUP (${leftover.length}):`);
+      allPlanLines.push(`Slot ${s} | ${locationName} | AVAILABLE FOR INSTANT PICKUP (${leftover.length}):`);
       for (const ch of leftover) {
         const label = await resolveLabel(funId, ch);
         allPlanLines.push(`  Locker ${label} (roadId ${ch.roadId})`);
@@ -229,11 +239,12 @@ async function main() {
   // assignSequentially mutates the order objects it's given in-place.
   // Since filter() returns new arrays but keeps the SAME object
   // references, those mutations are already reflected in the original
-  // slot1Orders/slot2Orders arrays — no merge-back step needed.
-  saveBucket(slot1File, slot1Orders);
-  saveBucket(slot2File, slot2Orders);
+  // slotOrdersAll arrays — no merge-back step needed.
+  for (let s = 1; s <= TOTAL_SLOTS; s++) {
+    saveBucket(slotFiles[s], slotOrdersAll[s]);
+  }
 
-  console.log(`\n✅ Saved assignments to ${slot1File} and ${slot2File}`);
+  console.log(`\n✅ Saved assignments to ${Object.values(slotFiles).join(', ')}`);
 
   if (allPlanLines.length === 0) {
     console.log('No orders for tomorrow — nothing to email.');

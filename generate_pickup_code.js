@@ -357,24 +357,33 @@ function todayDateKey() {
   return formatDateForBucket(nowInMYT());
 }
 
-// Instant Pickup draws from whichever slot's pool is "current" right now:
-// before 1PM MYT -> slot1's pool, 1PM onward (including the 1-2PM gap
-// and all of the evening) -> slot2's pool. Matches the boundary where
-// slot1's window (9AM-1PM) actually closes, not slot2's later start.
+// Instant Pickup draws from whichever slot's pool is "current" right now.
+// Boundaries match where each slot's window actually CLOSES, not where
+// the next slot starts — so the gap between slots belongs to the next
+// slot's mode, consistent with how the no-show check for that next
+// slot's release already treats the gap:
+//   before 2:00 PM MYT   -> slot 1's pool (slot 1 runs 9AM-2PM)
+//   2:00 PM - 6:29 PM    -> slot 2's pool (slot 2 runs 3PM-6:30PM)
+//   6:30 PM onward       -> slot 3's pool (slot 3 runs 7:30PM-10PM)
+// Uses total minutes since midnight, not whole hours, since 6:30PM isn't
+// a whole-hour boundary.
 function currentSlotNumber() {
   const myt = nowInMYT();
-  return myt.getUTCHours() < 13 ? 1 : 2;
+  const totalMinutes = myt.getUTCHours() * 60 + myt.getUTCMinutes();
+  if (totalMinutes < 14 * 60) return 1; // before 2:00 PM
+  if (totalMinutes < 18 * 60 + 30) return 2; // before 6:30 PM
+  return 3;
 }
 
 const ELIGIBLE_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_eligible_lockers.json');
 
 // Instant Pickup may ONLY use lockers that were specifically designated
-// as leftover/instant-eligible in last night's 9:30 PM plan for the
+// as leftover/instant-eligible in last night's 11PM plan for the
 // CURRENT slot — a fixed, known set. An advance locker that frees up
 // early during the day does NOT get added to this: staff need a stable
 // set to pre-stock against, not one that silently grows through the
-// day. This resets fresh every slot, since slot1 and slot2 each got
-// their own independent assignment last night.
+// day. This resets fresh every slot, since each slot got its own
+// independent assignment last night.
 const USED_INSTANT_LOCKERS_FILE = path.join(__dirname, 'pickup_codes', 'instant_lockers_used.json');
 
 function loadUsedInstantLockers() {
