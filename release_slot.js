@@ -30,8 +30,8 @@ function main() {
   const slot = process.argv[2];
   const archive = process.argv.includes('--archive');
 
-  if (slot !== '1' && slot !== '2') {
-    console.error('Usage: node release_slot.js <1|2> [--archive]');
+  if (!['1', '2', '3'].includes(slot)) {
+    console.error('Usage: node release_slot.js <1|2|3> [--archive]');
     process.exit(1);
   }
 
