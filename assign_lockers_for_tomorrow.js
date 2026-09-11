@@ -16,6 +16,31 @@
  * This does NOT generate any pickup code — purely a plan. The actual
  * code only gets created at release time, and only succeeds if the
  * assigned locker is genuinely free at that moment.
+ *
+ * GUARDS AGAINST BAD TRIGGERS (two separate problems, two separate checks):
+ *
+ * 1. TOO EARLY — this job must only run AFTER the 9 PM advance-booking
+ *    cutoff. If something fires it before then (a leftover GitHub cron
+ *    drifting into the wrong day, a misconfigured AWS schedule, clock
+ *    skew, a stray manual trigger), it would lock in a plan against an
+ *    INCOMPLETE order list — orders placed later that evening would be
+ *    silently skipped. This is a correctness bug, not just a duplicate
+ *    email. So: if current MYT time is before CUTOFF_HOUR_MYT, the job
+ *    exits immediately without touching any data, without emailing,
+ *    and WITHOUT writing the "already sent" marker below.
+ *
+ * 2. TOO OFTEN — once it's past cutoff, the job should still only
+ *    actually run once per target date. A marker file under
+ *    pickup_codes/ records the dateKey once the plan has been
+ *    successfully assigned + emailed. Any subsequent run for that same
+ *    dateKey (a duplicate trigger later the same night) short-circuits
+ *    before re-assigning lockers or sending another email.
+ *
+ * Critically, the marker is ONLY written by a run that both passed the
+ * cutoff check AND completed successfully — a too-early run never
+ * writes it, so it can never block the real run from happening later
+ * that same night. Delete the marker file manually if you ever need to
+ * force a legitimate re-run for a date that's already marked done.
  */
 
 const fs = require('fs');
@@ -150,9 +175,48 @@ async function sendPlanEmail(dateKey, planLines) {
 
 const TOTAL_SLOTS = 3;
 
+// Earliest MYT hour (24h clock) this job is allowed to do real work.
+// Must be AT or AFTER the advance-booking cutoff (9 PM MYT). Anything
+// that fires before this is treated as premature and is a strict no-op —
+// it must NOT write the "already sent" marker, since the real run for
+// that same date still needs to happen later tonight.
+const CUTOFF_HOUR_MYT = 21;
+
 async function main() {
-  const tomorrowMYT = new Date(nowInMYT().getTime() + 24 * 60 * 60 * 1000);
+  const nowMYT = nowInMYT();
+  const tomorrowMYT = new Date(nowMYT.getTime() + 24 * 60 * 60 * 1000);
   const dateKey = formatDateForBucket(tomorrowMYT);
+
+  // ── Guard 1: too early ───────────────────────────────────────────────
+  // NOTE: nowInMYT() is Date.now() + 8h with NO timezone re-interpretation
+  // — per date_utils.js convention, you must read it back with UTC
+  // getters (getUTCHours, not getHours) to get the correct MYT wall-clock
+  // value regardless of the runner's own local timezone.
+  if (nowMYT.getUTCHours() < CUTOFF_HOUR_MYT) {
+    console.log(
+      `⏭️  It's ${nowMYT.toISOString()} (MYT hour ${nowMYT.getUTCHours()}) — before the ` +
+      `${CUTOFF_HOUR_MYT}:00 MYT advance-booking cutoff. Refusing to assign lockers for ` +
+      `${dateKey} yet, since today's advance orders are still coming in. This run is a ` +
+      `no-op — no data touched, no email sent, no marker written. The real run should ` +
+      `still fire later tonight after cutoff.`
+    );
+    return;
+  }
+
+  // ── Guard 2: too often ───────────────────────────────────────────────
+  // If this dateKey's plan was already assigned + emailed successfully
+  // by a run that passed Guard 1, bail out. Protects against duplicate
+  // triggers after cutoff (AWS EventBridge firing more than once, a
+  // retried webhook, a leftover GitHub cron still enabled alongside AWS,
+  // etc.) without needing to find and fix every possible external cause.
+  const markerDir = path.join(__dirname, 'pickup_codes');
+  const sentMarkerFile = path.join(markerDir, `.plan_sent_${dateKey}`);
+  if (fs.existsSync(sentMarkerFile)) {
+    const sentAt = fs.readFileSync(sentMarkerFile, 'utf8').trim();
+    console.log(`⏭️  Plan for ${dateKey} was already sent at ${sentAt} — skipping duplicate run.`);
+    console.log(`   (Delete ${sentMarkerFile} manually if you need to force a legitimate re-run.)`);
+    return;
+  }
 
   console.log(`\n📋 Assigning lockers for ${dateKey}...\n`);
 
@@ -248,12 +312,22 @@ async function main() {
 
   if (allPlanLines.length === 0) {
     console.log('No orders for tomorrow — nothing to email.');
+    // Still mark as sent — an empty day is a completed run, not a
+    // reason to let a duplicate trigger re-process it.
+    fs.mkdirSync(markerDir, { recursive: true });
+    fs.writeFileSync(sentMarkerFile, new Date().toISOString());
     return;
   }
 
   console.log('\n' + allPlanLines.join('\n'));
   await sendPlanEmail(dateKey, allPlanLines);
   console.log('\n📧 Locker plan emailed.');
+
+  // Mark this dateKey as done — must happen only after a successful
+  // email send, so a genuine failure (e.g. SMTP error) still allows a
+  // legitimate retry rather than silently swallowing the plan.
+  fs.mkdirSync(markerDir, { recursive: true });
+  fs.writeFileSync(sentMarkerFile, new Date().toISOString());
 }
 
 main().catch((err) => {
