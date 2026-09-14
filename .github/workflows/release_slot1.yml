@@ -120,6 +120,57 @@ jobs:
             }
           "
 
+      - name: Send pickup code WhatsApp notifications (best-effort)
+        if: steps.bucket.outputs.path != '' && success() && steps.generate.outputs.pick_code != ''
+        continue-on-error: true
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WA_FROM: ${{ secrets.TWILIO_WA_FROM }}
+          WHATSAPP_CONTENT_SID: ${{ secrets.WHATSAPP_CONTENT_SID }}
+        run: |
+          echo "📱 Sending WhatsApp pickup notifications (non-blocking)..."
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
+            const phoneRegex = /^\+[1-9]\d{7,14}\$/;
+            const validOrders = orders.filter(o => {
+              const phone = (o.customerPhone || '').trim();
+              if (!phone || !phoneRegex.test(phone)) {
+                console.log('  ⚠️  Skipping WhatsApp for order ' + o.orderId + ' — no valid phone number');
+                return false;
+              }
+              return true;
+            });
+            console.log('Attempting ' + validOrders.length + ' WhatsApp send(s)...');
+            let sent = 0, failed = 0;
+            for (const o of validOrders) {
+              const env = {
+                ...process.env,
+                TO_PHONE:        o.customerPhone   || '',
+                CUSTOMER_NAME:   o.customerName    || '',
+                ORDER_ID:        o.orderId          || '',
+                PICK_CODE:       o.pickCode         || '',
+                LOCKER:          o.locker           || '',
+                PICKUP_LOCATION: o.orderLocation    || '',
+                PICKUP_DATE:     o.pickupDate       || '',
+                PICKUP_TIME:     o.pickupTime       || '',
+              };
+              try {
+                console.log('  Sending WhatsApp to ' + o.customerPhone + ' for order ' + o.orderId);
+                execSync('node send_whatsapp.js', { env, stdio: 'inherit' });
+                sent++;
+              } catch (err) {
+                console.log('  ⚠️  WhatsApp failed for order ' + o.orderId + ': ' + err.message);
+                failed++;
+              }
+            }
+            console.log('');
+            console.log('📱 WhatsApp summary: ' + sent + ' sent, ' + failed + ' failed (email already delivered to all customers regardless).');
+            process.exit(0);
+          " || echo "⚠️  WhatsApp step encountered an unexpected error — continuing, since email delivery is unaffected."
+
       - name: Trim bucket — flag any unresolved orders for manual attention
         if: steps.bucket.outputs.path != ''
         env:
