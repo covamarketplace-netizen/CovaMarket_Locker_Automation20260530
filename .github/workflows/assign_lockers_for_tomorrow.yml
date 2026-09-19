@@ -50,6 +50,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -d advance_queue ]; then git add -f advance_queue/; fi
+          if [ -d pickup_codes ]; then git add -f pickup_codes/; fi
           git diff --cached --quiet && echo "Nothing to commit" || git commit -m "Auto: assign lockers for tomorrow [skip ci]"
           # Retry push a few times — GitHub occasionally returns a
           # transient "Internal Server Error" on the remote side (not
