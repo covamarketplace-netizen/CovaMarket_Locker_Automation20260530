@@ -27,6 +27,18 @@
  * XZY support if a public replenish endpoint exists). Physical stock
  * levels (roadStock) still update correctly on their own via the hardware
  * regardless of which API is used to read them.
+ *
+ * DEMO MODE: detected via --demo-mode flag or DEMO_MODE=1 env var. For
+ * stakeholder demos that need to place orders continuously and receive a
+ * pickup code by email, well past the real 14-lockers-per-machine
+ * physical ceiling (see Locker allocation rules doc). Skips XZY entirely
+ * — no getRoodById, no createPickOrder, no active_lockers.json writes.
+ * Generates a random 6-digit code purely for the email. Every demo
+ * order's locker label is clearly tagged "DEMO-<n>" so it can never be
+ * mistaken for a real, functioning locker assignment downstream (in
+ * emails, in logs, or if someone greps active_lockers.json). Fully
+ * independent of real inventory — safe to run alongside live production
+ * traffic with zero interference.
  */
 
 const fs = require('fs');
@@ -38,6 +50,13 @@ const path = require('path');
 // prevent overlap within the run) EXCEPT the actual create_pick_order
 // call — no real pickup codes get generated on XZY's system.
 const DRY_RUN = process.argv.includes('--dry-run') || process.env.DRY_RUN === '1';
+
+// ── Demo mode ───────────────────────────────────────────────────────────
+// Unlike DRY_RUN, this never touches XZY at all — no locker lookup, no
+// stock check, no 14-per-machine ceiling. Purely for generating a
+// realistic-looking code to show in a demo email, unlimited quantity.
+const DEMO_MODE = process.argv.includes('--demo-mode') || process.env.DEMO_MODE === '1';
+
 const {
   createPickOrder,
   getFunByDept,
@@ -430,10 +449,16 @@ async function findInstantLocker(funId, activeLockers) {
   if (eligibleRoadIds === undefined) {
     console.log(
       `⚠️  No instant-eligible list found for ${dateKey}, funId ${funId}, ${slotKey} — ` +
-        `assign_lockers_for_tomorrow.js may not have run for today. Falling back to general search.`
+        `assign_lockers_for_tomorrow.js may not have run for today. Falling back to general search, ` +
+        `but STILL applying per-slot retirement so a locker can't be handed out twice in the same slot.`
     );
     const advanceReserved = getAdvanceReservedRoadIds(funId);
-    return await findLockerForOrder(funId, activeLockers, advanceReserved);
+    const usedData = loadUsedInstantLockers();
+    const usedThisSlot = new Set(usedData[dateKey]?.[funId]?.[slotKey] || []);
+    const excluded = new Set([...advanceReserved, ...usedThisSlot]);
+    const locker = await findLockerForOrder(funId, activeLockers, excluded);
+    markInstantLockerUsed(dateKey, funId, slotKey, locker.roadId);
+    return locker;
   }
 
   // Case 2: the entry DOES exist, but is a genuinely empty list — this
@@ -507,10 +532,24 @@ function consumeInstantCapacity(funId) {
   return { allowed: true, reason: `consumed 1 from ${slotKey}, ${remaining - 1} remaining` };
 }
 
+// ── Demo mode helpers ────────────────────────────────────────────────────
+// Generates a random 6-digit numeric string, same shape as a real XZY
+// pickCode, so demo emails look identical to production ones.
+function generateDemoPickCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// Clearly tagged so it can never be confused with a real locker
+// assignment downstream — in the email, in logs, or in any file someone
+// greps later. Counter is per-run (i = order index), not global, since
+// demo runs are one-off and don't need to track state across runs.
+function generateDemoLockerLabel(i) {
+  return `DEMO-${i + 1}`;
+}
 
 async function main() {
   try {
-    if (!process.env.XZY_APP_ID || !process.env.XZY_SECRET_KEY) {
+    if (!DEMO_MODE && (!process.env.XZY_APP_ID || !process.env.XZY_SECRET_KEY)) {
       throw new Error('XZY_APP_ID / XZY_SECRET_KEY not set!');
     }
 
@@ -521,7 +560,9 @@ async function main() {
     if (!orders.length) throw new Error(`No orders found in ${orderPath}`);
 
     console.log(`\n📦 Found ${orders.length} order(s) to process\n`);
-    if (DRY_RUN) {
+    if (DEMO_MODE) {
+      console.log('🎭 DEMO MODE — no XZY API calls, no real lockers, unlimited synthetic codes.\n');
+    } else if (DRY_RUN) {
       console.log('🧪 DRY RUN — no real pickup codes will be created on XZY.\n');
     }
 
@@ -533,6 +574,53 @@ async function main() {
       console.log(`📍 Location  : ${order.order_location}`);
 
       try {
+        // ── DEMO MODE branch ──────────────────────────────────────────
+        // Bypasses funId resolution, locker selection, and the real XZY
+        // API entirely. No dependency on the 14-lockers-per-machine
+        // ceiling, no active_lockers.json writes, no interference with
+        // real production traffic running at the same time.
+        if (DEMO_MODE) {
+          const pickCode = generateDemoPickCode();
+          const lockerLabel = generateDemoLockerLabel(i);
+
+          let displayPickupDate = order.pickup_date;
+          let displayPickupTime = order.pickup_time;
+          if (order.pickup_type === 'Instant Pickup') {
+            const myt = nowInMYT();
+            const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            displayPickupDate = `${days[myt.getUTCDay()]}, ${myt.getUTCDate()} ${months[myt.getUTCMonth()]} ${myt.getUTCFullYear()}`;
+            displayPickupTime = 'Available Now';
+          }
+
+          console.log('\n═══════════════════════════════════');
+          console.log(`🎭 DEMO PICKUP CODE : ${pickCode}`);
+          console.log(`🎭 DEMO LOCKER      : ${lockerLabel} (not a real locker)`);
+          console.log('═══════════════════════════════════\n');
+
+          console.log(
+            'OUTPUT_JSON:' +
+              JSON.stringify({
+                success: true,
+                demoMode: true,
+                pickCode,
+                orderNo: `DEMO-${Date.now()}-${i + 1}`,
+                locker: lockerLabel,
+                generatedAt: new Date().toISOString(),
+                orderId: order.order_id,
+                customerName: order.customer_name,
+                customerEmail: order.email,
+                customerPhone: order.phone || null,
+                orderLocation: order.order_location || 'Demo Location',
+                pickupDate: displayPickupDate,
+                pickupTime: displayPickupTime,
+              })
+          );
+
+          if (i < orders.length - 1) await sleep(300); // no need for the real 1.5s API-courtesy delay
+          continue;
+        }
+
         const funId = resolveFunId(order.order_location);
         console.log(`📦 funId=${funId} (resolved from "${order.order_location}")`);
 
