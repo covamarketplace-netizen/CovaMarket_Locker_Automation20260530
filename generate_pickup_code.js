@@ -284,7 +284,11 @@ function getAdvanceReservedRoadIds(funId) {
   const dateKey = todayDateKey();
   const reserved = new Set();
 
-  for (const slot of [1, 2]) {
+  // Checks all 3 slots' buckets — Slot 3 orders get their locker
+  // pre-assigned the night before too (same as Slot 1/2), so a daytime
+  // Instant Pickup order must not be allowed to grab a locker that's
+  // already committed to tonight's Slot 3 release.
+  for (const slot of [1, 2, 3]) {
     const file = path.join(QUEUE_DIR, `order_details_${dateKey}_slot${slot}.json`);
     if (!fs.existsSync(file)) continue;
     try {
