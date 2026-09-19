@@ -7,14 +7,5 @@
     "funId": 715,
     "pickupDate": "Sat, 19 Sep 2026",
     "createdAt": "2026-09-19T07:20:11.357Z"
-  },
-  "912349": {
-    "pickCode": "157540",
-    "orderNo": "202609191548314628bfa",
-    "locker": "Locker 7-2",
-    "goodsId": 6090,
-    "funId": 716,
-    "pickupDate": "Sat, 19 Sep 2026",
-    "createdAt": "2026-09-19T07:48:31.621Z"
   }
 }
