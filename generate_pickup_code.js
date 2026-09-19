@@ -454,7 +454,16 @@ async function findInstantLocker(funId, activeLockers) {
     );
     const advanceReserved = getAdvanceReservedRoadIds(funId);
     const usedData = loadUsedInstantLockers();
-    const usedThisSlot = new Set(usedData[dateKey]?.[funId]?.[slotKey] || []);
+    // IMPORTANT: normalize to strings here. advanceReserved is already
+    // strings (getAdvanceReservedRoadIds uses String(...) internally),
+    // but usedThisSlot comes straight from JSON as numbers. Mixing the
+    // two in one Set silently breaks findLockerForOrder's exclusion
+    // check below, since it compares via String(ch.roadId) — a strict
+    // Set.has(96351) vs Set.has("96351") mismatch means an already-used
+    // locker slips right back into the pool. Confirmed in production on
+    // 2026-09-19: roadId 96351 was reassigned 5 times in one slot before
+    // this normalization was added.
+    const usedThisSlot = new Set((usedData[dateKey]?.[funId]?.[slotKey] || []).map(String));
     const excluded = new Set([...advanceReserved, ...usedThisSlot]);
     const locker = await findLockerForOrder(funId, activeLockers, excluded);
     markInstantLockerUsed(dateKey, funId, slotKey, locker.roadId);
@@ -480,10 +489,10 @@ async function findInstantLocker(funId, activeLockers) {
   // stock it once per slot; it should never need re-stocking mid-slot
   // for a second, different customer.
   const usedData = loadUsedInstantLockers();
-  const usedThisSlot = new Set(usedData[dateKey]?.[funId]?.[slotKey] || []);
+  const usedThisSlot = new Set((usedData[dateKey]?.[funId]?.[slotKey] || []).map(String));
 
   for (const roadId of eligibleRoadIds) {
-    if (usedThisSlot.has(roadId)) continue; // already opened once this slot — permanently retired
+    if (usedThisSlot.has(String(roadId))) continue; // already opened once this slot — permanently retired
     if (activeRoadIds.has(String(roadId))) continue; // currently tracked (pending, not yet collected)
     const channel = channels.find((ch) => ch.roadId === roadId);
     if (!channel) continue;
