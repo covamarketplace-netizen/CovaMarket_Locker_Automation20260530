@@ -10,6 +10,12 @@ on:
 jobs:
   report-expired-pickups:
     runs-on: ubuntu-latest
+    # Skips this entire job while Demo Mode is on (toggled via the
+    # "Toggle Demo Mode" workflow) — mainly to avoid noisy/confusing
+    # no-show alerts about demo activity landing in the real expiry
+    # report inbox during a live demo. Shows as "skipped" in the Actions
+    # UI, not failed.
+    if: ${{ vars.DEMO_MODE_ACTIVE != 'true' }}
 
     steps:
       - name: Checkout

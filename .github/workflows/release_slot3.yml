@@ -25,6 +25,11 @@ concurrency:
 jobs:
   release-slot-3:
     runs-on: ubuntu-latest
+    # Skips this entire job while Demo Mode is on (toggled via the
+    # "Toggle Demo Mode" workflow) — prevents a real slot release from
+    # touching the same 14 lockers a live demo is using. Shows as
+    # "skipped" in the Actions UI, not failed.
+    if: ${{ vars.DEMO_MODE_ACTIVE != 'true' }}
     permissions:
       contents: write
     steps:

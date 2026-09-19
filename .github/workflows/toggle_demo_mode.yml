@@ -1,0 +1,52 @@
+name: Toggle Demo Mode
+
+# Flips the DEMO_MODE_ACTIVE repository variable on or off. While ON,
+# release_slot1/2/3, assign_lockers_for_tomorrow, compute_instant_capacity,
+# and report_expired_pickups all SKIP themselves entirely (shown as
+# "skipped" in the Actions UI, not failed) — so a live demo on the real
+# 14 lockers can't collide with those scheduled jobs.
+#
+# Deliberately does NOT touch orders.yml ("Fetch Shopify Orders") or
+# generate_pickup_code.yml ("Generate XYZ Vending Pickup Code") — those
+# ARE the real Instant Pickup pipeline the demo runs on top of, and must
+# keep working exactly as normal while Demo Mode is on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      state:
+        description: 'Turn demo mode on or off'
+        required: true
+        type: choice
+        options:
+          - 'on'
+          - 'off'
+
+jobs:
+  toggle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set DEMO_MODE_ACTIVE repository variable
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          VALUE="false"
+          if [ "${{ github.event.inputs.state }}" = "on" ]; then
+            VALUE="true"
+          fi
+
+          gh variable set DEMO_MODE_ACTIVE --body "$VALUE" --repo "${{ github.repository }}"
+
+          echo "✅ DEMO_MODE_ACTIVE is now: $VALUE"
+          echo ""
+          if [ "$VALUE" = "true" ]; then
+            echo "🎭 Demo Mode ON."
+            echo "   PAUSED: Release Advance Pickup Codes (Slot 1/2/3), Assign Lockers For Tomorrow,"
+            echo "           Compute Instant Pickup Capacity, Report Expired Pickup Codes."
+            echo "   STILL RUNNING NORMALLY: Fetch Shopify Orders -> Generate XYZ Vending Pickup Code"
+            echo "   (this is the real pipeline the demo itself runs on)."
+            echo ""
+            echo "   Remember to run this workflow again with 'off' once the demo is done."
+          else
+            echo "✅ Demo Mode OFF — all regular scheduled jobs resume normally."
+          fi
