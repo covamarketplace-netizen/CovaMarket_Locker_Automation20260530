@@ -1,0 +1,12 @@
+[
+  {
+    "order_id": "#1735",
+    "customer_name": "test test",
+    "email": "jhlee1214@gmail.com",
+    "phone": "+60123456789",
+    "order_location": "LRT Lembah Subang",
+    "pickup_type": "Instant Pickup",
+    "pickup_date": "N/A",
+    "pickup_time": "N/A"
+  }
+]
