@@ -13,20 +13,5 @@
     "assignedRoadRow": 1,
     "assignedRoadColumn": 1,
     "assignedLocker": "Locker 1-1"
-  },
-  {
-    "order_id": "#1719",
-    "customer_name": "test test",
-    "email": "jhlee1214@gmail.com",
-    "phone": "+60123456789",
-    "order_location": "LRT Lembah Subang",
-    "pickup_type": "Advance Pickup",
-    "pickup_date": "Mon, 21 Sep 2026",
-    "pickup_time": "9:00 AM - 2:00 PM",
-    "assignedRoadId": 912337,
-    "assignedGoodsId": 6091,
-    "assignedRoadRow": 2,
-    "assignedRoadColumn": 1,
-    "assignedLocker": "Locker 2-1"
   }
 ]
