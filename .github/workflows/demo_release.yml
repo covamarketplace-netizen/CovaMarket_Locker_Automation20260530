@@ -1,0 +1,107 @@
+name: Demo - Generate Pickup Codes (Unlimited)
+
+# Manual-only, self-serve demo runner. NOT part of the real pickup
+# pipeline — never triggered by schedule, Shopify, or AWS. Generates N
+# synthetic orders and emails each one a realistic-looking pickup code,
+# entirely bypassing the real 14-lockers-per-machine ceiling (see the
+# "Locker allocation rules" section of the ops doc for why that ceiling
+# exists and can't be raised in software).
+#
+# Codes generated here are clearly tagged (locker "DEMO-1", "DEMO-2", …)
+# and never touch active_lockers.json or the real XZY API — safe to run
+# any time, including while real production traffic is live.
+
+on:
+  workflow_dispatch:
+    inputs:
+      order_count:
+        description: 'How many demo orders to generate (max 200)'
+        required: true
+        default: '5'
+      customer_email:
+        description: 'Email address to send all demo codes to'
+        required: true
+      customer_name:
+        description: 'Customer name to show in the email'
+        required: false
+        default: 'Demo Customer'
+      order_location:
+        description: 'Location name to show in the email'
+        required: false
+        default: 'Demo Location'
+
+jobs:
+  run-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Generate demo orders
+        run: |
+          node make_demo_orders.js \
+            "${{ github.event.inputs.order_count }}" \
+            "${{ github.event.inputs.customer_email }}" \
+            "${{ github.event.inputs.customer_name }}" \
+            "${{ github.event.inputs.order_location }}"
+
+      - name: Generate demo pickup codes (no real XZY calls)
+        id: generate
+        env:
+          DEMO_MODE: '1'
+          ORDERS_FILE: /tmp/demo_orders.json
+        run: |
+          set +e
+          node generate_pickup_code.js 2>&1 | tee /tmp/node_output.txt
+          echo "────────────────────────"
+
+          grep "OUTPUT_JSON:" /tmp/node_output.txt | sed 's/OUTPUT_JSON://' > /tmp/jsons.txt
+          echo "📦 JSON lines found: $(wc -l < /tmp/jsons.txt)"
+
+          node -e "
+            const fs = require('fs');
+            const lines = fs.readFileSync('/tmp/jsons.txt','utf8').trim().split('\n').filter(Boolean);
+            const results = [];
+            for (const l of lines) {
+              try {
+                const d = JSON.parse(l);
+                if (d.success) results.push(d);
+              } catch(e) {}
+            }
+            fs.writeFileSync('/tmp/success_orders.json', JSON.stringify(results));
+            console.log('Parsed ' + results.length + ' successful demo code(s)');
+          "
+
+      - name: Send demo pickup code emails
+        env:
+          GMAIL_USER: covamarketplace@gmail.com
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          echo "📧 Sending demo pickup code emails..."
+          node -e "
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            const orders = JSON.parse(fs.readFileSync('/tmp/success_orders.json', 'utf8'));
+            console.log('Sending ' + orders.length + ' demo email(s)...');
+            for (const o of orders) {
+              const env = {
+                ...process.env,
+                TO_EMAIL:        o.customerEmail || '',
+                CUSTOMER_NAME:   o.customerName  || '',
+                ORDER_ID:        o.orderId        || '',
+                PICK_CODE:       o.pickCode       || '',
+                LOCKER:          o.locker         || '',
+                PICKUP_LOCATION: o.orderLocation  || '',
+                PICKUP_DATE:     o.pickupDate     || '',
+                PICKUP_TIME:     o.pickupTime     || '',
+              };
+              console.log('  Sending to ' + o.customerEmail + ' — order ' + o.orderId + ' — code ' + o.pickCode);
+              execSync('node send_email.js', { env, stdio: 'inherit' });
+            }
+            console.log('✅ All demo emails sent.');
+          "
