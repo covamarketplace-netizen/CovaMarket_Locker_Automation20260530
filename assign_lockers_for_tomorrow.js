@@ -74,6 +74,28 @@ async function resolveLabel(funId, channel) {
   return getGoodsName(channel.goodsId);
 }
 
+// Same logic as generate_pickup_code.js's Instant Pickup ordering, kept
+// consistent on purpose: parses [row, col] from a locker's DISPLAYED
+// label ("1-1", "Locker 1-1", etc.) so lockers get assigned in the
+// natural order a person expects (1-1, 1-2, 2-1, 2-2...), not whatever
+// raw order XZY's hardware happens to report channels in. Before this,
+// Advance Pickup used the raw hardware order while Instant Pickup used
+// the natural order — meaning the SAME slot could hand out "1-1" to an
+// Advance customer and then "3-1" (not "1-2") to the next Instant
+// customer, an inconsistency a customer or staff member would notice.
+function parseRowCol(label) {
+  const match = String(label).match(/(\d+)\D+(\d+)/);
+  if (!match) return [Infinity, Infinity];
+  return [Number(match[1]), Number(match[2])];
+}
+
+function compareByRowCol(labelA, labelB) {
+  const [rowA, colA] = parseRowCol(labelA);
+  const [rowB, colB] = parseRowCol(labelB);
+  if (rowA !== rowB) return rowA - rowB;
+  return colA - colB;
+}
+
 function loadBucket(file) {
   if (!fs.existsSync(file)) return [];
   try {
@@ -91,10 +113,23 @@ function saveBucket(file, orders) {
 // Assigns channels[0], channels[1], ... to orders in order. If there are
 // more orders than channels (shouldn't happen — capped at 14 by
 // accumulate_advance_orders.js), extras are left unassigned and flagged.
-async function assignSequentially(funId, orders, channels) {
-  const labels = [];
-  for (const ch of channels) labels.push(await resolveLabel(funId, ch));
+// Sorts channels by their DISPLAYED label (1-1, 1-2, 2-1, 2-2...) once,
+// up front — used both for the actual Advance assignment AND for
+// computing "leftover" channels for Instant Pickup, so both agree on
+// the same order and neither silently reverts to raw hardware order.
+async function sortChannelsByLabel(funId, channels) {
+  const withLabels = [];
+  for (const ch of channels) withLabels.push({ ch, label: await resolveLabel(funId, ch) });
+  withLabels.sort((a, b) => compareByRowCol(a.label, b.label));
+  return withLabels.map(({ ch, label }) => ({ ...ch, resolvedLabel: label }));
+}
 
+// Assigns channels[0], channels[1], ... to orders in order. If there are
+// more orders than channels (shouldn't happen — capped at 14 by
+// accumulate_advance_orders.js), extras are left unassigned and flagged.
+// Expects `channels` to already be sorted by sortChannelsByLabel — this
+// function no longer sorts internally, so callers stay consistent.
+async function assignSequentially(funId, orders, channels) {
   const planLines = [];
   for (let i = 0; i < orders.length; i++) {
     if (i >= channels.length) {
@@ -108,7 +143,7 @@ async function assignSequentially(funId, orders, channels) {
     orders[i].assignedGoodsId = ch.goodsId;
     orders[i].assignedRoadRow = ch.roadRow;
     orders[i].assignedRoadColumn = ch.roadColumn;
-    orders[i].assignedLocker = labels[i];
+    orders[i].assignedLocker = ch.resolvedLabel;
   }
   return orders;
 }
@@ -244,6 +279,7 @@ async function main() {
     let channels = [];
     try {
       channels = await getRoodById(funId);
+      channels = await sortChannelsByLabel(funId, channels);
     } catch (err) {
       console.error(`❌ Could not fetch channels for ${locationName}: ${err.message}`);
       continue;
@@ -278,8 +314,7 @@ async function main() {
 
       allPlanLines.push(`Slot ${s} | ${locationName} | AVAILABLE FOR INSTANT PICKUP (${leftover.length}):`);
       for (const ch of leftover) {
-        const label = await resolveLabel(funId, ch);
-        allPlanLines.push(`  Locker ${label} (roadId ${ch.roadId})`);
+        allPlanLines.push(`  Locker ${ch.resolvedLabel} (roadId ${ch.roadId})`);
       }
     }
   }

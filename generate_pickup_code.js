@@ -314,6 +314,29 @@ function getAdvanceReservedRoadIds(funId) {
 // extraExcludedRoadIds: used by Instant Pickup to also avoid lockers
 // already pre-assigned (but not yet released) to an Advance order —
 // see getAdvanceReservedRoadIds() below.
+// Extracts [row, col] as numbers from a locker's DISPLAYED label — e.g.
+// "1-1", "Locker 1-1", "Locker2 2-3" all parse to [1,1] / [2,3]. Used to
+// pick lockers in the natural order a person would expect (1-1, 1-2,
+// 2-1, 2-2...) instead of whatever raw order XZY's hardware reports
+// channels in. Confirmed both machines' RAW hardware order has "1-2"
+// oddly placed near the end rather than right after "1-1" — this is
+// purely a wiring/install quirk, unrelated to anything about the
+// locker's actual availability. Falls back to [Infinity, Infinity] for
+// an unparseable label, so anything odd sorts LAST rather than crashing
+// or silently jumping to the front.
+function parseRowCol(label) {
+  const match = String(label).match(/(\d+)\D+(\d+)/);
+  if (!match) return [Infinity, Infinity];
+  return [Number(match[1]), Number(match[2])];
+}
+
+function compareByRowCol(labelA, labelB) {
+  const [rowA, colA] = parseRowCol(labelA);
+  const [rowB, colB] = parseRowCol(labelB);
+  if (rowA !== rowB) return rowA - rowB;
+  return colA - colB;
+}
+
 async function findLockerForOrder(funId, activeLockers, extraExcludedRoadIds = new Set()) {
   const channels = await getRoodById(funId);
   console.log(`📦 Total channels for funId ${funId}: ${channels.length}`);
@@ -344,8 +367,18 @@ async function findLockerForOrder(funId, activeLockers, extraExcludedRoadIds = n
     );
   }
 
-  const chosen = stocked[0];
-  const realLabel = await resolveLockerLabel(funId, chosen);
+  // Resolve every candidate's DISPLAYED label first, then sort by that —
+  // not by whatever raw order the hardware API returned them in. For
+  // funId 716 this hits getGoodsName(), but that's backed by a
+  // page-fetched cache populated on the first call, so resolving all
+  // candidates here costs no extra real API round-trips versus the old
+  // "only resolve the winner" approach.
+  const withLabels = await Promise.all(
+    stocked.map(async (ch) => ({ ch, label: await resolveLockerLabel(funId, ch) }))
+  );
+  withLabels.sort((a, b) => compareByRowCol(a.label, b.label));
+
+  const { ch: chosen, label: realLabel } = withLabels[0];
   return {
     goodsId: chosen.goodsId,
     roadId: chosen.roadId,
@@ -495,14 +528,25 @@ async function findInstantLocker(funId, activeLockers) {
   const usedData = loadUsedInstantLockers();
   const usedThisSlot = new Set((usedData[dateKey]?.[funId]?.[slotKey] || []).map(String));
 
+  // Same reasoning as findLockerForOrder: walk candidates in natural
+  // displayed-label order (1-1, 1-2, 2-1, 2-2...), not whatever order
+  // they happen to sit in the eligible list. Resolve each eligible
+  // roadId's channel + label up front, sort, then pick the first that
+  // clears the exclusion checks.
+  const eligibleWithLabels = [];
   for (const roadId of eligibleRoadIds) {
-    if (usedThisSlot.has(String(roadId))) continue; // already opened once this slot — permanently retired
-    if (activeRoadIds.has(String(roadId))) continue; // currently tracked (pending, not yet collected)
     const channel = channels.find((ch) => ch.roadId === roadId);
     if (!channel) continue;
+    const label = await resolveLockerLabel(funId, channel);
+    eligibleWithLabels.push({ roadId, channel, label });
+  }
+  eligibleWithLabels.sort((a, b) => compareByRowCol(a.label, b.label));
+
+  for (const { roadId, channel, label } of eligibleWithLabels) {
+    if (usedThisSlot.has(String(roadId))) continue; // already opened once this slot — permanently retired
+    if (activeRoadIds.has(String(roadId))) continue; // currently tracked (pending, not yet collected)
     if ((channel.roadStock ?? 0) <= 0) continue;
 
-    const label = await resolveLockerLabel(funId, channel);
     markInstantLockerUsed(dateKey, funId, slotKey, roadId);
     return {
       goodsId: channel.goodsId,
