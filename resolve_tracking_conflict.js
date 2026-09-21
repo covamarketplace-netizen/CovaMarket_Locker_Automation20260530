@@ -30,6 +30,11 @@
  *     Simple set union — same reasoning.
  *   - pickup_codes/instant_lockers_used.json — nested arrays of roadIds
  *     per date/funId/slot. Union per key, deduplicated.
+ *   - pickup_codes/latest.json — added 2026-09-21. A pure "last run"
+ *     snapshot that every run overwrites completely, so it isn't
+ *     additive data at all: the run being replayed (the newest one)
+ *     simply wins. It was the file that blocked the merge in the
+ *     #229/#230 race.
  *
  *   NOT SAFELY AUTO-MERGEABLE (this script does NOT attempt these —
  *   see the honesty note in the conversation this was built from):
@@ -45,7 +50,7 @@
  *     merging needs care this script does not yet attempt. Left to the
  *     existing failure path for now.
  *
- * If any file outside the three safely-mergeable ones is part of the
+ * If any file outside the safely-mergeable ones is part of the
  * conflict, this script exits non-zero and changes nothing — the
  * calling workflow step will then fail loudly and visibly, exactly as
  * it does today, rather than silently guessing at a merge it can't be
@@ -64,6 +69,7 @@ const SAFELY_MERGEABLE = [
   'pickup_codes/active_lockers.json',
   'pickup_codes/processed_order_ids.json',
   'pickup_codes/instant_lockers_used.json',
+  'pickup_codes/latest.json',
 ];
 
 function getConflictedFiles() {
@@ -73,9 +79,14 @@ function getConflictedFiles() {
 
 // Reads a conflicted file's two sides directly from git's index, rather
 // than trying to parse merge-marker text out of the working file (which
-// is fragile and format-dependent). Stage 2 = "ours" (the commit being
-// rebased on top, i.e. this run's local changes). Stage 3 = "theirs"
-// (what's now on the remote).
+// is fragile and format-dependent).
+//
+// IMPORTANT — stage meaning DURING A REBASE (which is how the workflows
+// call this): stage 2 = the upstream branch we're rebasing ONTO (what's
+// now on the remote); stage 3 = the local commit being REPLAYED (this
+// run's own changes). This is the opposite of a normal `git merge`.
+// The union merges below are symmetric so it doesn't matter for them,
+// but it DOES matter for latest.json.
 function readStage(file, stage) {
   try {
     const raw = execSync(`git show :${stage}:${file}`, { encoding: 'utf8' });
@@ -137,13 +148,19 @@ function mergeFile(file) {
     merged = mergeOrderIdArray(ours, theirs);
   } else if (file.endsWith('instant_lockers_used.json')) {
     merged = mergeInstantLockersUsed(ours, theirs);
+  } else if (file.endsWith('latest.json')) {
+    // Pure "last run" snapshot, fully overwritten by every run. During a
+    // rebase, stage 3 = the commit being replayed = this run's result,
+    // which is the newest, so it wins. Fall back to the other side only
+    // if this run's version is missing/unparseable.
+    merged = theirs ?? ours;
   } else {
     return false; // shouldn't happen given the caller's filter, but be safe
   }
 
   fs.writeFileSync(file, JSON.stringify(merged, null, 2) + '\n');
   execSync(`git add "${file}"`);
-  console.log(`✅ Merged ${file} at the data level (union of both sides' records).`);
+  console.log(`✅ Merged ${file} at the data level.`);
   return true;
 }
 
