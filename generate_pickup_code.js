@@ -560,6 +560,37 @@ function generateDemoLockerLabel(i) {
   return `DEMO-${i + 1}`;
 }
 
+// ── Permanent cross-run duplicate protection ────────────────────────────
+// Bucket files and active_lockers.json only reflect CURRENT, still-open
+// state — once an order succeeds and its bucket entry is removed, there
+// is no memory that it was ever handled. If the upstream order-fetch
+// step ever re-submits the same order_id (e.g. because Shopify's own
+// fulfillment status was never updated to reflect a code was already
+// issued), nothing previously stopped it from being processed a SECOND
+// time — a real, working locker + code + email + WhatsApp, all over
+// again, for an order that already has one. Confirmed happening in
+// production on 2026-09-21 (orders #1720/#1721 each got a second full
+// notification cycle). This file is the permanent fix: every order_id
+// that has EVER succeeded, checked before doing any real work, for as
+// long as this file persists (never purged automatically).
+const PROCESSED_ORDERS_FILE = path.join(__dirname, 'pickup_codes', 'processed_order_ids.json');
+
+function loadProcessedOrderIds() {
+  if (!fs.existsSync(PROCESSED_ORDERS_FILE)) return new Set();
+  try {
+    return new Set(JSON.parse(fs.readFileSync(PROCESSED_ORDERS_FILE, 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+
+function markOrderProcessed(orderId) {
+  const ids = loadProcessedOrderIds();
+  ids.add(orderId);
+  fs.mkdirSync(path.dirname(PROCESSED_ORDERS_FILE), { recursive: true });
+  fs.writeFileSync(PROCESSED_ORDERS_FILE, JSON.stringify([...ids], null, 2));
+}
+
 async function main() {
   try {
     if (!DEMO_MODE && (!process.env.XZY_APP_ID || !process.env.XZY_SECRET_KEY)) {
@@ -585,6 +616,29 @@ async function main() {
       console.log(`📦 Processing order ${i + 1}/${orders.length}: ${order.order_id}`);
       console.log(`👤 Customer  : ${order.customer_name} <${order.email}>`);
       console.log(`📍 Location  : ${order.order_location}`);
+
+      // Skip entirely if this order_id has EVER succeeded before, on ANY
+      // previous run — regardless of whether it's still sitting in a
+      // bucket file right now. This is the actual guard against the
+      // upstream Fetch-Orders step re-submitting an already-fulfilled
+      // order (Shopify has no idea our external locker system already
+      // issued a code, so it can legitimately re-serve the same order
+      // again later). No new locker touched, no email, no WhatsApp —
+      // this is a pure no-op for a genuine duplicate.
+      if (!DEMO_MODE && loadProcessedOrderIds().has(order.order_id)) {
+        console.log(`⏭️  Order ${order.order_id} already has a pickup code from a previous run — skipping duplicate.`);
+        console.log(
+          'OUTPUT_JSON:' +
+            JSON.stringify({
+              success: false,
+              orderId: order.order_id,
+              error: 'DUPLICATE_ALREADY_PROCESSED',
+              skippedDuplicate: true,
+            })
+        );
+        if (i < orders.length - 1) await sleep(300);
+        continue;
+      }
 
       try {
         // ── DEMO MODE branch ──────────────────────────────────────────
@@ -705,6 +759,12 @@ async function main() {
           createdAt: new Date().toISOString(),
         };
         saveActiveLockers(activeLockers);
+        // Permanent record — survives even after this locker is later
+        // freed and reused for someone else. This is what actually
+        // prevents a re-submitted duplicate order from ever reaching
+        // this point again, regardless of what active_lockers.json says
+        // at that later time.
+        markOrderProcessed(order.order_id);
 
         console.log('\n═══════════════════════════════════');
         console.log(`✅ PICKUP CODE : ${result.pickCode}`);

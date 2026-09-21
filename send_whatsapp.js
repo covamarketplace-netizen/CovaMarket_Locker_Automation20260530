@@ -8,7 +8,7 @@
  * customer-initiated 24-hour session window.
  *
  * Template: pickup_code_notification
- * ContentSid: HXe703d3727fc7ea0a5f327d45ad97ad79
+ * ContentSid: HXeaa289a1ae73818d09e0f84d956ff128
  * Category: Utility
  *
  * Required env vars:
@@ -34,7 +34,7 @@ const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const from       = process.env.TWILIO_WA_FROM || '+19522487543'; // approved production sender
 const to         = process.env.TO_PHONE;
-const contentSid = process.env.WHATSAPP_CONTENT_SID || 'HXe703d3727fc7ea0a5f327d45ad97ad79';
+const contentSid = process.env.WHATSAPP_CONTENT_SID || 'HXeaa289a1ae73818d09e0f84d956ff128';
 
 if (!accountSid || !authToken) {
   console.error('❌ TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set');

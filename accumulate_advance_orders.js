@@ -16,6 +16,21 @@
  *                      scheduled release for that specific date+slot
  *                      (see release_slot.js).
  *
+ * DUPLICATE PROTECTION: the existing "already in bucket" check only
+ * catches an order_id that's still SITTING in the current bucket file.
+ * Once that order has been successfully released, its bucket entry is
+ * removed — at which point this script has no memory it was ever
+ * handled. If the upstream order-fetch step ever re-submits the same
+ * order_id later (e.g. Shopify's own fulfillment status was never
+ * updated to reflect a code was already issued externally), nothing
+ * stopped it from being re-bucketed and re-processed from scratch,
+ * generating a second real locker + code + email + WhatsApp for an
+ * order that already has one. Confirmed happening in production on
+ * 2026-09-21. Now also checks the PERMANENT processed_order_ids.json
+ * (the same file generate_pickup_code.js writes to on every real
+ * success) before ever bucketing an order — this catches it before it
+ * even reaches a bucket file, as the first line of defense.
+ *
  * Usage: node accumulate_advance_orders.js <path-to-raw-orders.json>
  */
 
@@ -26,6 +41,7 @@ const { formatDateForBucket, slotFromPickupTime } = require('./date_utils');
 
 const QUEUE_DIR = path.join(__dirname, 'advance_queue');
 const TOTAL_LOCKERS_PER_LOCATION = 14;
+const PROCESSED_ORDERS_FILE = path.join(__dirname, 'pickup_codes', 'processed_order_ids.json');
 
 function loadBucket(file) {
   if (!fs.existsSync(file)) return [];
@@ -35,6 +51,15 @@ function loadBucket(file) {
 function saveBucket(file, orders) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(orders, null, 2));
+}
+
+function loadProcessedOrderIds() {
+  if (!fs.existsSync(PROCESSED_ORDERS_FILE)) return new Set();
+  try {
+    return new Set(JSON.parse(fs.readFileSync(PROCESSED_ORDERS_FILE, 'utf8')));
+  } catch {
+    return new Set();
+  }
 }
 
 function main() {
@@ -48,10 +73,20 @@ function main() {
   const orders = JSON.parse(fs.readFileSync(orderPath, 'utf8'));
   console.log(`\n📦 Sorting ${orders.length} order(s) by pickup_type...\n`);
 
+  const processedIds = loadProcessedOrderIds();
+
   const instantOrders = [];
   const advanceOrders = [];
 
   for (const order of orders) {
+    // Catch a re-submitted, already-fulfilled order as early as possible
+    // — before it's even split into Instant/Advance, so it can never
+    // reach a second real code generation via either path.
+    if (processedIds.has(order.order_id)) {
+      console.log(`⏭️  Order ${order.order_id} already has a pickup code from a previous run — skipping entirely (duplicate submission).`);
+      continue;
+    }
+
     if (order.pickup_type === 'Instant Pickup') {
       instantOrders.push(order);
     } else if (order.pickup_type === 'Advance Pickup') {
