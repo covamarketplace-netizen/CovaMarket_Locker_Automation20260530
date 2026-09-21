@@ -704,8 +704,32 @@ async function main() {
           const capacityCheck = consumeInstantCapacity(funId);
           console.log(`⚡ Instant Pickup capacity check: ${capacityCheck.reason}`);
         } else if (order.assignedRoadId) {
-          console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — targeting it specifically, no substitution.`);
-          locker = await useAssignedLocker(order, activeLockers);
+          console.log(`🎯 Order has a pre-assigned locker (${order.assignedLocker}) — trying it first.`);
+          try {
+            locker = await useAssignedLocker(order, activeLockers);
+          } catch (assignErr) {
+            // The planned locker turned out to be unavailable (most
+            // likely a stuck/uncancelled old code, same as the
+            // 2026-09 Sentul Timur "1-1" incident). Rather than failing
+            // the order outright and requiring manual GitHub/XZY
+            // intervention to unblock it, fall back to a genuinely free
+            // locker so the customer isn't held up — but flag it
+            // clearly (both in logs and in a dedicated field on the
+            // success output) so staff still get told to go investigate
+            // and cancel whatever's stuck on the original locker. This
+            // is a deliberate tradeoff: it sacrifices the "always fail
+            // loudly, never substitute" guarantee this function used to
+            // have, in exchange for the order actually completing.
+            console.warn(
+              `⚠️  SUBSTITUTION: pre-assigned locker ${order.assignedLocker} unavailable for order ${order.order_id} ` +
+                `(${assignErr.message}) — falling back to a different locker. The original needs manual investigation.`
+            );
+            const advanceReserved = getAdvanceReservedRoadIds(funId);
+            locker = await findLockerForOrder(funId, activeLockers, advanceReserved);
+            locker.substituted = true;
+            locker.originalAssignedLocker = order.assignedLocker;
+            locker.substitutionReason = assignErr.message;
+          }
         } else {
           // Advance order missing a pre-assignment (e.g. the 9:30 PM job
           // didn't run) — safety fallback to a general search, still
@@ -790,6 +814,16 @@ async function main() {
               orderLocation: order.order_location,
               pickupDate: displayPickupDate,
               pickupTime: displayPickupTime,
+              // Only present when the pre-assigned locker had to be
+              // swapped for a different one — see trim_bucket_after_wave.js,
+              // which scans for this and sends a dedicated staff alert.
+              ...(locker.substituted
+                ? {
+                    substituted: true,
+                    originalAssignedLocker: locker.originalAssignedLocker,
+                    substitutionReason: locker.substitutionReason,
+                  }
+                : {}),
             })
         );
       } catch (err) {
