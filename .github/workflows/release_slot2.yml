@@ -217,5 +217,15 @@ jobs:
             fi
             echo "⚠️  Push attempt $attempt failed, retrying in 5s..."
             sleep 5
-            git pull --rebase
+            if ! git pull --rebase; then
+              echo "⚠️  Rebase hit a real content conflict — attempting a safe data-level merge..."
+              if node resolve_tracking_conflict.js; then
+                export GIT_EDITOR=true
+                git rebase --continue
+              else
+                echo "❌ Could not safely auto-merge — aborting rebase for manual resolution."
+                git rebase --abort
+                exit 1
+              fi
+            fi
           done
