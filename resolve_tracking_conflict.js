@@ -35,6 +35,17 @@
  *     additive data at all: the run being replayed (the newest one)
  *     simply wins. It was the file that blocked the merge in the
  *     #229/#230 race.
+ *   - advance_queue/*.json bucket files — added 2026-09-21 after a
+ *     confirmed production incident: order #1713's resolved-bucket
+ *     deletion was lost to exactly this "not safely mergeable" gap,
+ *     leaving a stale duplicate entry that got genuinely re-sent to the
+ *     customer hours later. Union by order_id (an order already in the
+ *     bucket wins over a duplicate, since duplicates only ever add a
+ *     fresh unresolved copy of something already tracked). After
+ *     merging, re-checks the 14-per-location cap for that date+slot —
+ *     if the union pushes a location over 14, the overflow orders are
+ *     moved to advance_queue/needs_manual_attention/ instead of being
+ *     silently accepted over the real physical limit.
  *
  *   NOT SAFELY AUTO-MERGEABLE (this script does NOT attempt these —
  *   see the honesty note in the conversation this was built from):
@@ -45,10 +56,6 @@
  *     under-count the true remaining budget. This script leaves this
  *     file's conflict for the existing manual-resolution failure path
  *     — it is NOT silently guessed at.
- *   - advance_queue/*.json bucket files — mergeable in principle (union
- *     of orders), but re-validating the 14-per-location cap after
- *     merging needs care this script does not yet attempt. Left to the
- *     existing failure path for now.
  *
  * If any file outside the safely-mergeable ones is part of the
  * conflict, this script exits non-zero and changes nothing — the
@@ -72,6 +79,21 @@ const SAFELY_MERGEABLE = [
   'pickup_codes/instant_lockers_used.json',
   'pickup_codes/latest.json',
 ];
+
+const TOTAL_LOCKERS_PER_LOCATION = 14;
+
+// Bucket files are named dynamically (order_details_<date>_slot<N>.json),
+// so they can't be matched by a fixed suffix like the pickup_codes/ files
+// above — matched by path pattern instead. Excludes the
+// needs_manual_attention/ subfolder, which holds a different kind of
+// record (already-failed orders) that this script doesn't need to touch.
+function isBucketFile(f) {
+  return f.startsWith('advance_queue/') && f.endsWith('.json') && !f.includes('needs_manual_attention/');
+}
+
+function isSafelyMergeable(f) {
+  return SAFELY_MERGEABLE.some((safe) => f.endsWith(safe)) || isBucketFile(f);
+}
 
 function getConflictedFiles() {
   const out = execSync('git diff --name-only --diff-filter=U', { encoding: 'utf8' });
@@ -138,6 +160,69 @@ function mergeInstantLockersUsed(ours, theirs) {
   return merged;
 }
 
+// Union by order_id — if the SAME order_id somehow appears on both sides
+// (e.g. one side already resolved/removed it, the other side still has
+// an unresolved copy from before that resolution landed — exactly the
+// #1713 incident this was built for), "ours" wins, since it represents
+// this run's own just-computed state and is more likely to reflect the
+// most recent real outcome. A duplicate order_id on both sides is
+// otherwise just the SAME pending order tracked twice — not two real
+// orders — so deduplicating by order_id is always correct here, unlike
+// active_lockers.json where two DIFFERENT orders could coincidentally
+// need combining.
+function mergeBucketOrders(ours, theirs) {
+  const byId = new Map();
+  for (const o of theirs || []) byId.set(o.order_id, o);
+  for (const o of ours || []) byId.set(o.order_id, o); // ours overwrites on collision
+  return [...byId.values()];
+}
+
+// After merging, the combined list could exceed the real 14-lockers-per-
+// location cap if both sides had independently accepted orders up to
+// the limit. Rather than silently exceeding a real physical ceiling,
+// anything past 14 per location gets moved to needs_manual_attention/
+// (mirroring how trim_bucket_after_wave.js already handles unresolved
+// orders) so staff get told, instead of the pipeline quietly promising
+// more lockers than physically exist.
+function enforceCapacityCap(bucketFile, orders) {
+  const perLocationCount = {};
+  const kept = [];
+  const overflow = [];
+
+  for (const o of orders) {
+    const loc = o.order_location;
+    perLocationCount[loc] = (perLocationCount[loc] || 0) + 1;
+    if (perLocationCount[loc] <= TOTAL_LOCKERS_PER_LOCATION) {
+      kept.push(o);
+    } else {
+      overflow.push(o);
+    }
+  }
+
+  if (overflow.length > 0) {
+    const dir = path.join(path.dirname(bucketFile), 'needs_manual_attention');
+    fs.mkdirSync(dir, { recursive: true });
+    const overflowFile = path.join(dir, path.basename(bucketFile));
+    let existingOverflow = [];
+    if (fs.existsSync(overflowFile)) {
+      try {
+        existingOverflow = JSON.parse(fs.readFileSync(overflowFile, 'utf8'));
+      } catch {
+        existingOverflow = [];
+      }
+    }
+    fs.writeFileSync(overflowFile, JSON.stringify([...existingOverflow, ...overflow], null, 2));
+    execSync(`git add "${overflowFile}"`);
+    console.warn(
+      `⚠️  Merging two conflicting versions of ${path.basename(bucketFile)} pushed a location over the ` +
+        `${TOTAL_LOCKERS_PER_LOCATION}-per-location cap — moved ${overflow.length} order(s) to ` +
+        `${overflowFile} for manual attention rather than silently exceeding real physical capacity.`
+    );
+  }
+
+  return kept;
+}
+
 function mergeFile(file) {
   const ours = readStage(file, 2);
   const theirs = readStage(file, 3);
@@ -155,6 +240,9 @@ function mergeFile(file) {
     // which is the newest, so it wins. Fall back to the other side only
     // if this run's version is missing/unparseable.
     merged = theirs ?? ours;
+  } else if (isBucketFile(file)) {
+    const unionOrders = mergeBucketOrders(ours, theirs);
+    merged = enforceCapacityCap(file, unionOrders);
   } else {
     return false; // shouldn't happen given the caller's filter, but be safe
   }
@@ -174,7 +262,7 @@ function main() {
 
   console.log(`Conflicted files: ${conflicted.join(', ')}`);
 
-  const unsafe = conflicted.filter((f) => !SAFELY_MERGEABLE.some((safe) => f.endsWith(safe)));
+  const unsafe = conflicted.filter((f) => !isSafelyMergeable(f));
   if (unsafe.length > 0) {
     console.error(
       `❌ Cannot safely auto-merge: ${unsafe.join(', ')}\n` +
