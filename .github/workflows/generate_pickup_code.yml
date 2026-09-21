@@ -22,9 +22,19 @@ jobs:
       contents: write
 
     steps:
+      # FIX 2026-09-21: on a push event, actions/checkout defaults to the
+      # commit that TRIGGERED the run (github.sha), not the latest main.
+      # A run that waited in the concurrency queue therefore worked from a
+      # stale snapshot — it didn't see the previous run's bot commit, so
+      # processed_order_ids.json didn't list the order and it was
+      # processed twice (second locker + code + email + WhatsApp), then
+      # the push was rejected. ref: main is resolved when the job starts,
+      # i.e. after it finishes waiting, so it always sees the previous
+      # run's commit.
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0 # need full history to diff against github.event.before
 
@@ -247,9 +257,15 @@ jobs:
           echo "📋 Git status after add:"
           git status
 
-          git diff --staged --quiet && echo "⚠️ Nothing to commit — file unchanged" || \
+          # FIX 2026-09-21: the old version used `|| \` so only the
+          # ORDERS_STR line was conditional and `git commit` ran every
+          # time, failing when nothing was staged. Proper if/else now.
+          if git diff --staged --quiet; then
+            echo "⚠️ Nothing to commit — file unchanged"
+          else
             ORDERS_STR=$(python3 -c "import json; o=json.load(open('/tmp/success_orders.json')); print(','.join([x.get('orderId','') for x in o]))" 2>/dev/null || echo "orders")
             git commit -m "Pickup codes generated for orders: $ORDERS_STR"
+          fi
 
           # Retry push a few times — GitHub occasionally returns a
           # transient "Internal Server Error" on the remote side (not
