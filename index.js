@@ -88,18 +88,49 @@ function formatPhone(rawPhone, countryCode) {
   return dialCode + digits;
 }
 
-const query = `
+// ── Cursor-based fetch — FIX 2026-09-21 ─────────────────────────────────
+// The old query always asked "what's the single most recent Free Pickup
+// order today?" with no memory of what was already fetched. When two
+// orders arrived close together, whichever run's query happened to
+// execute LATER would see the NEWER order as "most recent" — even if
+// that run was triggered by the OLDER order's own webhook. The older
+// order was never asked for by name by anyone, and silently vanished
+// with zero trace, no error, nothing. Confirmed happening in production
+// 2026-09-21: order #1751 was placed and paid, but never once appeared
+// in any order_consolidation file — order #1752 (placed shortly after)
+// was fetched twice instead, by two separate runs that both landed on
+// "most recent" = #1752.
+//
+// FIX: persist a cursor (the createdAt of the newest order this script
+// has ever considered) and query for EVERYTHING since that cursor, not
+// just the single newest one. This makes every run self-sufficient —
+// it doesn't matter which webhook triggered it or how many orders
+// piled up in between, a run always catches up to fully current state.
+//
+// Residual risk: if two runs' cursor READS overlap (same class of race
+// as before, just narrower), both could re-fetch the same order once.
+// That's fine — order_id-level dedup downstream (processed_order_ids.json
+// / claim_orders.js) already catches and discards an exact duplicate
+// fetch. A duplicate fetch is a minor, already-solved inconvenience; a
+// silently DROPPED order — today's actual bug — is a customer never
+// served at all, which is strictly worse. This fix trades the rare,
+// harmless failure mode for the common, harmful one.
+const CURSOR_FILE = 'pickup_codes/shopify_sync_cursor.json';
+
+function buildQuery(sinceIso) {
+  return `
 query {
-  orders(first: 1,
+  orders(first: 25,
   sortKey: CREATED_AT,
-  reverse: true,  
-  query:"created_at:>=${today} AND shipping_method:'Free Pickup'") {
+  reverse: false,
+  query:"created_at:>'${sinceIso}' AND shipping_method:'Free Pickup'") {
     edges {
       node {
         id
         name
         email
         phone
+        createdAt
         shippingAddress {
           name
           phone
@@ -120,6 +151,80 @@ query {
   }
 }
 `;
+}
+
+async function getFileSha(path) {
+  const apiHost = 'api.' + 'github.com';
+  const url = 'https://' + apiHost + '/repos/' + githubOwner + '/' + githubRepo + '/contents/' + path + '?ref=' + githubBranch;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': 'Bearer ' + githubToken,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'shopify-order-sync',
+    },
+  });
+  if (!res.ok) return null; // file doesn't exist yet, or other issue — treat as "no sha"
+  const data = await res.json();
+  return data.sha;
+}
+
+async function readCursorFile() {
+  const apiHost = 'api.' + 'github.com';
+  const url = 'https://' + apiHost + '/repos/' + githubOwner + '/' + githubRepo + '/contents/' + CURSOR_FILE + '?ref=' + githubBranch;
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': 'Bearer ' + githubToken,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'shopify-order-sync',
+    },
+  });
+  if (!res.ok) {
+    // No cursor yet (first-ever run) — default to start of today, same
+    // as the old behavior, rather than backfilling all history.
+    return today + 'T00:00:00Z';
+  }
+  const data = await res.json();
+  const content = Buffer.from(data.content, 'base64').toString('utf-8');
+  try {
+    return JSON.parse(content).lastCreatedAt;
+  } catch {
+    return today + 'T00:00:00Z';
+  }
+}
+
+// Retries on a stale-sha conflict — two near-simultaneous runs updating
+// this same small file is possible (same underlying race as everywhere
+// else in this pipeline); a few retries with a fresh sha resolves it
+// without any manual JSON merging, since this file only ever holds one
+// single timestamp value, not structured data that could conflict.
+async function writeCursorFile(newCursorIso) {
+  const apiHost = 'api.' + 'github.com';
+  const url = 'https://' + apiHost + '/repos/' + githubOwner + '/' + githubRepo + '/contents/' + CURSOR_FILE;
+  const contentBase64 = Buffer.from(JSON.stringify({ lastCreatedAt: newCursorIso }, null, 2), 'utf-8').toString('base64');
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const sha = await getFileSha(CURSOR_FILE);
+    const body = { message: 'Update Shopify sync cursor', content: contentBase64, branch: githubBranch };
+    if (sha) body.sha = sha;
+
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Bearer ' + githubToken,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'shopify-order-sync',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) return;
+
+    console.warn(`⚠️  Cursor write attempt ${attempt} failed (likely a concurrent update) — retrying...`);
+    await new Promise((r) => setTimeout(r, 1000 * attempt));
+  }
+  console.error('❌ Could not write cursor file after 3 attempts — next run will re-check from the same cursor, which is safe (may just refetch one extra order).');
+}
 
 async function getToken() {
   if (accessToken && Date.now() < tokenExpiresAt - 60000) {
@@ -205,6 +310,9 @@ async function main() {
 
   try {
     const token = await getToken();
+    const sinceIso = await readCursorFile();
+    console.log('📍 Fetching orders since cursor: ' + sinceIso);
+    const query = buildQuery(sinceIso);
 
     const res = await fetch(url, {
       method: 'POST',
@@ -226,9 +334,19 @@ async function main() {
       const orders = data.data.orders.edges;
 
       if (orders.length === 0) {
-        console.log("Tidak ada order hari ini.");
+        console.log("Tidak ada order baru sejak cursor terakhir.");
         return;
       }
+
+      // Advance the cursor based on EVERY order returned by the date/
+      // shipping-method filter — not just ones that pass the pickup-type
+      // filter below. Otherwise an order with some other fulfillment
+      // type would never let the cursor move past it, and it would be
+      // re-fetched (harmlessly, but pointlessly) on every future run.
+      const newestCreatedAt = orders.reduce((max, edge) => {
+        const c = edge.node.createdAt;
+        return !max || new Date(c) > new Date(max) ? c : max;
+      }, null);
 
       orders.forEach(edge => {
         const node = edge.node;
@@ -280,6 +398,10 @@ async function main() {
 
       if (orderResults.length === 0) {
         console.log("Tidak ada order Instant Pickup atau Advance Pickup hari ini.");
+        // Still advance the cursor — we DID consider these orders, they
+        // just didn't match the pickup-type filter. Not advancing here
+        // would mean re-fetching the same non-matching orders forever.
+        if (newestCreatedAt) await writeCursorFile(newestCreatedAt);
         return;
       }
 
@@ -292,6 +414,11 @@ async function main() {
       const fileUrl = await uploadToGithub(filename, jsonContent);
 
       console.log('Uploaded ' + orderResults.length + ' orders to GitHub: ' + fileUrl);
+
+      // Only advance the cursor AFTER the order file itself is safely
+      // uploaded — if uploadToGithub had thrown, we'd want the next run
+      // to still consider these same orders rather than skip them.
+      if (newestCreatedAt) await writeCursorFile(newestCreatedAt);
     } else {
       console.log("Gagal memproses data atau format response tidak sesuai:", JSON.stringify(data, null, 2));
     }

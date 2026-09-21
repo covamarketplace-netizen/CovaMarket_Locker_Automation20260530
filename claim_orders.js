@@ -12,6 +12,21 @@
  * physical locker, 26 seconds apart, because both runs' checkouts landed
  * before either run's commit.
  *
+ * IMPORTANT — uses a SEPARATE file from processed_order_ids.json, on
+ * purpose: pickup_codes/claimed_order_ids.json. An earlier version of
+ * this script wrote directly to processed_order_ids.json, which
+ * immediately broke every order — generate_pickup_code.js's own
+ * early-exit dedup check reads that SAME file and skips anything
+ * already listed in it, so an order that had JUST been claimed was
+ * instantly treated as "already done" and skipped before any real work
+ * ever happened. Confirmed in production 2026-09-21: every order after
+ * this script was deployed silently did nothing (0-second processing
+ * step, no code, no email, no WhatsApp). Claiming and actually
+ * succeeding are two different facts and now live in two different
+ * files: this script only ever writes to claimed_order_ids.json;
+ * processed_order_ids.json is written ONLY by generate_pickup_code.js,
+ * at the point a real pickup code is actually created.
+ *
  * THE FIX: don't rely on READING shared state to decide "is this new?" —
  * that read can always race. Instead, ATTEMPT TO WRITE a claim first,
  * and let git's own atomicity on the server decide who wins. A `git
@@ -43,25 +58,38 @@
 const fs = require('fs');
 const { execSync } = require('child_process');
 
-const PROCESSED_FILE = 'pickup_codes/processed_order_ids.json';
+const CLAIMED_FILE = 'pickup_codes/claimed_order_ids.json';
 const MAX_ATTEMPTS = 5;
 
 function sh(cmd) {
   return execSync(cmd, { encoding: 'utf8' });
 }
 
-function loadProcessedIds() {
+function loadClaimedIds() {
+  if (!fs.existsSync(CLAIMED_FILE)) return new Set();
+  try {
+    return new Set(JSON.parse(fs.readFileSync(CLAIMED_FILE, 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveClaimedIds(ids) {
+  fs.mkdirSync('pickup_codes', { recursive: true });
+  fs.writeFileSync(CLAIMED_FILE, JSON.stringify([...ids], null, 2));
+}
+
+// Read-only — this script NEVER writes to processed_order_ids.json.
+// That file's writes belong entirely to generate_pickup_code.js, at
+// the point a real pickup code is actually, successfully created.
+function loadProcessedIdsReadOnly() {
+  const PROCESSED_FILE = 'pickup_codes/processed_order_ids.json';
   if (!fs.existsSync(PROCESSED_FILE)) return new Set();
   try {
     return new Set(JSON.parse(fs.readFileSync(PROCESSED_FILE, 'utf8')));
   } catch {
     return new Set();
   }
-}
-
-function saveProcessedIds(ids) {
-  fs.mkdirSync('pickup_codes', { recursive: true });
-  fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...ids], null, 2));
 }
 
 function main() {
@@ -88,11 +116,17 @@ function main() {
       console.error(`⚠️  Sync failed on attempt ${attempt}: ${err.message}`);
     }
 
-    const processedIds = loadProcessedIds();
-    const toClaim = allOrders.filter((o) => !processedIds.has(o.order_id));
+    const claimedIds = loadClaimedIds();
+    // Also check the REAL success record — protects any order from
+    // BEFORE this claiming mechanism existed (already genuinely
+    // fulfilled, but with no entry in claimed_order_ids.json since that
+    // file didn't exist yet) from ever being re-claimed if Shopify were
+    // to resend a stale old webhook.
+    const alreadyProcessedIds = loadProcessedIdsReadOnly();
+    const toClaim = allOrders.filter((o) => !claimedIds.has(o.order_id) && !alreadyProcessedIds.has(o.order_id));
 
     if (toClaim.length === 0) {
-      console.log('⏭️  Every order in this batch is already claimed/processed — nothing new to do.');
+      console.log('⏭️  Every order in this batch is already claimed or already processed — nothing new to do.');
       fs.writeFileSync(outputFile, JSON.stringify([]));
       return;
     }
@@ -100,11 +134,11 @@ function main() {
     const claimIds = toClaim.map((o) => o.order_id);
     console.log(`Attempt ${attempt}/${MAX_ATTEMPTS}: trying to claim [${claimIds.join(', ')}]...`);
 
-    const newProcessedIds = new Set([...processedIds, ...claimIds]);
-    saveProcessedIds(newProcessedIds);
+    const newClaimedIds = new Set([...claimedIds, ...claimIds]);
+    saveClaimedIds(newClaimedIds);
 
     try {
-      sh(`git add "${PROCESSED_FILE}"`);
+      sh(`git add "${CLAIMED_FILE}"`);
       sh(`git commit -m "Claim order(s): ${claimIds.join(', ')} [skip ci]"`);
       sh('git push origin main');
       // Push succeeded — these order_ids are now atomically ours. No one

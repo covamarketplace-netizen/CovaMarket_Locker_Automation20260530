@@ -68,6 +68,7 @@ const { execSync } = require('child_process');
 const SAFELY_MERGEABLE = [
   'pickup_codes/active_lockers.json',
   'pickup_codes/processed_order_ids.json',
+  'pickup_codes/claimed_order_ids.json',
   'pickup_codes/instant_lockers_used.json',
   'pickup_codes/latest.json',
 ];
@@ -144,7 +145,7 @@ function mergeFile(file) {
   let merged;
   if (file.endsWith('active_lockers.json')) {
     merged = mergeActiveLockersOrSimilarObject(ours, theirs);
-  } else if (file.endsWith('processed_order_ids.json')) {
+  } else if (file.endsWith('processed_order_ids.json') || file.endsWith('claimed_order_ids.json')) {
     merged = mergeOrderIdArray(ours, theirs);
   } else if (file.endsWith('instant_lockers_used.json')) {
     merged = mergeInstantLockersUsed(ours, theirs);
