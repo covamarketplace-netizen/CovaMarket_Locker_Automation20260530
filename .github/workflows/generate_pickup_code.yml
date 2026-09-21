@@ -86,12 +86,35 @@ jobs:
           echo "path=$FILE" >> $GITHUB_OUTPUT
           echo "📋 Using order file: $FILE"
 
+      # ── Atomic claim — RACE FIX 2026-09-21 ────────────────────────────
+      # The ref:main checkout fix and permanent processed_order_ids.json
+      # both assume one run fully finishes before the next starts. That
+      # assumption broke in production: two runs' JOBS genuinely
+      # overlapped despite the concurrency group, both read
+      # processed_order_ids.json before either had written to it, and
+      # both processed order #1752 — two real codes for the same
+      # physical locker. Concurrency and checkout timing can't be fully
+      # trusted to prevent this. What CAN be trusted: a `git push` to the
+      # same ref from two places can never both succeed — GitHub's server
+      # rejects the second one, deterministically, no matter how close
+      # together they were. This step uses that as the actual lock,
+      # before any locker, code, email, or WhatsApp work happens.
+      - name: Atomically claim orders (prevents duplicate-processing races)
+        id: claim
+        run: |
+          node claim_orders.js "${{ steps.order_file.outputs.path }}" /tmp/claimed_orders.json
+          COUNT=$(node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/claimed_orders.json','utf8')).length)")
+          echo "claimed_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "📋 Claimed $COUNT order(s) for real processing (any not listed here were already claimed elsewhere — nothing more to do for those)."
+
+
       - name: Sort & process incoming orders
         id: generate
+        if: steps.claim.outputs.claimed_count != '0'
         env:
           XZY_APP_ID:     ${{ secrets.XZY_APP_ID }}
           XZY_SECRET_KEY: ${{ secrets.XZY_SECRET_KEY }}
-          ORDERS_FILE:    ${{ steps.order_file.outputs.path }}
+          ORDERS_FILE:    /tmp/claimed_orders.json
         run: |
           set +e
           # Instant Pickup orders get processed immediately inside this
@@ -246,7 +269,7 @@ jobs:
           " || echo "⚠️  WhatsApp step encountered an unexpected error — continuing, since email delivery is unaffected."
 
       - name: Commit tracking files
-        if: success() && steps.order_file.outputs.path != ''
+        if: success() && steps.claim.outputs.claimed_count != '0' && steps.order_file.outputs.path != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
