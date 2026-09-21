@@ -14,8 +14,8 @@ name: Release Advance Pickup Codes - Slot 2 (3PM-6:30PM)
 # happen to fire, that's safe (a successful release empties today's
 # bucket, so whichever fires second just finds nothing left to do).
 on:
-  schedule:
-    - cron: '30 6 * * *'
+  # Native schedule: REMOVED 2026-09-21 — see release_slot1.yml for the
+  # full explanation. AWS EventBridge Scheduler owns real triggering.
   workflow_dispatch:
 
 concurrency:

@@ -4,8 +4,15 @@ name: Release Advance Pickup Codes - Slot 1 (9AM-2PM)
 # MYT = UTC+8, that's 23:30 UTC the PREVIOUS calendar day — verified
 # before writing this.
 on:
-  schedule:
-    - cron: '30 23 * * *'
+  # Native schedule: REMOVED 2026-09-21 — AWS EventBridge Scheduler has
+  # owned real triggering for a while now. Leaving this "harmless backup"
+  # in place was never actually harmless: GitHub's own schedule fires
+  # hours late under load, and a late-firing run can pick up a bucket
+  # file whose earlier resolution never landed (a lost commit from an
+  # unmerged conflict), silently re-sending an already-fulfilled order.
+  # Confirmed happening in production 2026-09-21 (order #1713, resent
+  # ~4.5 hours after its intended slot window). workflow_dispatch (AWS's
+  # trigger method) is now the only way this fires.
   workflow_dispatch:
 
 concurrency:

@@ -7,6 +7,14 @@ name: Generate XYZ Vending Pickup Code
 concurrency:
   group: generate-pickup-code
   cancel-in-progress: false
+  queue: max
+  # queue: max FIX 2026-09-21: without this, a concurrency group only
+  # holds 1 running + 1 queued job — every NEW run arriving while one is
+  # already queued SILENTLY EVICTS it, with zero error, zero log. When
+  # many orders arrive close together (8 files in ~2 min, confirmed
+  # production 2026-09-21), most queued runs never executed at all —
+  # orders #1771/#1772 vanished this way. queue: max makes every queued
+  # run actually wait its turn instead of collapsing to one slot.
 
 on:
   push:
