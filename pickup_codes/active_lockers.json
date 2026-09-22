@@ -80,6 +80,15 @@
     "pickupDate": "Tue, 22 Sep 2026",
     "createdAt": "2026-09-22T12:38:16.140Z"
   },
+  "912341": {
+    "pickCode": "600689",
+    "orderNo": "20260922203852639a39e",
+    "locker": "Locker 4-1",
+    "goodsId": 6080,
+    "funId": 716,
+    "pickupDate": "Tue, 22 Sep 2026",
+    "createdAt": "2026-09-22T12:38:52.781Z"
+  },
   "912347": {
     "pickCode": "592185",
     "orderNo": "20260922203704508a308",
