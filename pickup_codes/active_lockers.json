@@ -9,12 +9,12 @@
     "createdAt": "2026-10-08T12:02:56.050Z"
   },
   "96351": {
-    "pickCode": "868973",
-    "orderNo": "20261020143033542b60f",
+    "pickCode": "536579",
+    "orderNo": "20261025073027184b750",
     "locker": "Locker 1-1",
     "goodsId": 5556,
     "funId": 716,
-    "pickupDate": "Tue, 20 Oct 2026",
-    "createdAt": "2026-10-20T06:30:34.077Z"
+    "pickupDate": "Sun, 25 Oct 2026",
+    "createdAt": "2026-10-24T23:30:27.455Z"
   }
 }
